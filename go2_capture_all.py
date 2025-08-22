@@ -225,6 +225,52 @@ def main():
             if not frame_q.full():
                 frame_q.put(img)
 
+    def display_lowstate_data(message):
+
+        # Extracting data from the message
+        imu_state = message['imu_state']['rpy']
+        motor_state = message['motor_state']
+        bms_state = message['bms_state']
+        foot_force = message['foot_force']
+        temperature_ntc1 = message['temperature_ntc1']
+        power_v = message['power_v']
+
+        # Clear the entire screen and reset cursor position to top
+        sys.stdout.write("\033[H\033[J")
+
+        # Print the Go2 Robot Status
+        print("Go2 Robot Status (LowState)")
+        print("===========================")
+
+        # IMU State (RPY)
+        print(f"IMU - RPY: Roll: {imu_state[0]}, Pitch: {imu_state[1]}, Yaw: {imu_state[2]}")
+
+        # Compact Motor States Display (Each motor on one line)
+        print("\nMotor States (q, Temperature, Lost):")
+        print("------------------------------------------------------------")
+        for i, motor in enumerate(motor_state):
+            # Display motor info in a single line
+            print(f"Motor {i + 1:2}: q={motor['q']:.4f}, Temp={motor['temperature']}°C, Lost={motor['lost']}")
+
+        # BMS (Battery Management System) State
+        print("\nBattery Management System (BMS) State:")
+        print(f"  Version: {bms_state['version_high']}.{bms_state['version_low']}")
+        print(f"  SOC (State of Charge): {bms_state['soc']}%")
+        print(f"  Current: {bms_state['current']} mA")
+        print(f"  Cycle Count: {bms_state['cycle']}")
+        print(f"  BQ NTC: {bms_state['bq_ntc']}°C")
+        print(f"  MCU NTC: {bms_state['mcu_ntc']}°C")
+
+        # Foot Force
+        print(f"\nFoot Force: {foot_force}")
+
+        # Additional Sensors
+        print(f"Temperature NTC1: {temperature_ntc1}°C")
+        print(f"Power Voltage: {power_v}V")
+
+        # Optionally, flush to ensure immediate output
+        sys.stdout.flush()
+
     def lowstate_callback(msg):
         data = msg["data"]
         rpy = tuple(data["imu_state"]["rpy"])
@@ -232,22 +278,25 @@ def main():
         power_v = data.get("power_v")
         latest_state["imu"], latest_state["soc"], latest_state["power_v"] = rpy, soc, power_v
 
+        # optionally display to console
+        # display_lowstate_data(data)
+
     def lidar_callback(msg):
         try:
-            print(f"Lidar message received: {type(msg)}")
-            print(f"Message keys: {msg.keys() if hasattr(msg, 'keys') else 'No keys'}")
+            # print(f"Lidar message received: {type(msg)}")
+            # print(f"Message keys: {msg.keys() if hasattr(msg, 'keys') else 'No keys'}")
             
             data = msg["data"]["data"]
             positions = data.get("positions", [])
-            print(f"Positions length: {len(positions)}")
+            # print(f"Positions length: {len(positions)}")
             
             if len(positions) > 0:
                 # Convert positions to numpy array
                 points = np.array([positions[i:i+3] for i in range(0, len(positions), 3)], dtype=np.float32)
-                print(f"Converted to {len(points)} points")
+                # print(f"Converted to {len(points)} points")
                 if not lidar_q.full():
                     lidar_q.put(points)
-                    print(f"Added {len(points)} points to queue")
+                    # print(f"Added {len(points)} points to queue")
         except Exception as e:
             print(f"Lidar callback error: {e}")
             import traceback
@@ -281,7 +330,7 @@ def main():
     setup_visualization()
     
     # Simple OpenCV viewer + HUD
-    h, w = 480, 640  # Reduced from 720x1280 to 480x640
+    h, w = 360, 640  # Reduced from 720x1280 to 480x640
     cv2.namedWindow("Go2 Video", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Go2 Video", w, h)  # Explicitly set window size
     blank = np.zeros((h, w, 3), np.uint8)
@@ -344,7 +393,7 @@ def main():
             soc = latest_state["soc"]
             pv = latest_state["power_v"]
             hud = f"IMU RPY: {r:.2f}, {p:.2f}, {y:.2f} | SOC: {soc}% | V: {pv}V"
-            cv2.putText(img, hud, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
+            cv2.putText(img, hud, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
             cv2.imshow("Go2 Video", img)
             
             # Update lidar plot
