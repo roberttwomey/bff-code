@@ -1,4 +1,6 @@
-# filepath: plot_lidar_stream_rt.py
+
+""" Robert Twomey rtwomey@ucsd.edu """
+""" based on """# filepath: plot_lidar_stream_rt.py
 """ @MrRobotoW at The RoboVerse Discord """
 """ robert.wagoner@gmail.com """
 """ 01/30/2025 """

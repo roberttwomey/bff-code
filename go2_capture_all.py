@@ -8,6 +8,195 @@ import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.FATAL)
 
+# Open3D visualization variables
+vis = None
+pcd = None
+visualization_running = False
+
+# Constants for point rotation
+ROTATE_X_ANGLE = np.pi / 2  # 90 degrees
+ROTATE_Z_ANGLE = np.pi      # 180 degrees
+
+def adjust_view_to_fit_data(vis, points):
+    """Adjust the view to fit all the point cloud data."""
+    if len(points) == 0:
+        return
+    
+    try:
+        # Calculate the bounding box
+        min_coords = np.min(points, axis=0)
+        max_coords = np.max(points, axis=0)
+        center = (min_coords + max_coords) / 2
+        extent = max_coords - min_coords
+        max_extent = np.max(extent)
+        
+        # Get view control
+        ctr = vis.get_view_control()
+        
+        # Set the look-at point to the center of the data
+        ctr.set_lookat(center)
+        
+        # Calculate a reasonable zoom level based on the extent
+        # Add some padding (1.5x) to ensure all points are visible
+        zoom_factor = 1.0 / (max_extent * 1.5)
+        ctr.set_zoom(zoom_factor)
+        
+        # print(f"Adjusted view: center={center}, zoom_factor={zoom_factor:.6f}")  # Suppressed debug message
+        
+    except Exception as e:
+        print(f"Error adjusting view: {e}")
+
+def update_visualization(points, scalars):
+    """Update the point cloud visualization with new data."""
+    global pcd, vis
+    
+    if not visualization_running or vis is None:
+        return
+    
+    try:
+        if len(points) == 0:
+            # Clear existing point cloud if no points
+            if pcd is not None:
+                pcd.points = o3d.utility.Vector3dVector(np.empty((0, 3)))
+                pcd.colors = o3d.utility.Vector3dVector(np.empty((0, 3)))
+                vis.update_geometry(pcd)
+        else:
+            # Calculate and display data extent
+            extent_info = calculate_data_extent(points)
+            
+            # Update existing point cloud instead of recreating
+            if pcd is None:
+                # Create point cloud only once
+                pcd = o3d.geometry.PointCloud()
+                vis.add_geometry(pcd, False)
+            
+            # Update points
+            pcd.points = o3d.utility.Vector3dVector(points)
+            
+            # Color points by scalar values with better contrast
+            colors = np.zeros((len(points), 3))
+            if len(scalars) > 0:
+                max_scalar = np.max(scalars)
+                min_scalar = np.min(scalars)
+                if max_scalar > min_scalar:
+                    normalized_scalars = (scalars - min_scalar) / (max_scalar - min_scalar)
+                    # Use a more vibrant color scheme
+                    colors[:, 0] = normalized_scalars  # Red for distance
+                    colors[:, 1] = 0.5 + 0.5 * normalized_scalars  # Green
+                    colors[:, 2] = 1.0 - normalized_scalars  # Blue inverse
+                else:
+                    colors[:, 0] = 1.0  # Default red
+                    colors[:, 1] = 0.5  # Default green
+                    colors[:, 2] = 0.0  # Default blue
+            else:
+                colors[:, 0] = 1.0  # Default red
+                colors[:, 1] = 0.5  # Default green
+                colors[:, 2] = 0.0  # Default blue
+            
+            # Update colors
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            
+            # Update the visualizer (only once per frame)
+            vis.update_geometry(pcd)
+            
+            # Adjust view to fit all points (only on first update or when needed)
+            # adjust_view_to_fit_data(vis, points)
+        
+        # print(f"Updated visualization with {len(points)} points")  # Suppressed debug message
+        
+    except Exception as e:
+        print(f"Error updating visualization: {e}")
+        import traceback
+        traceback.print_exc()
+
+def setup_visualization():
+    """Initialize Open3D visualization."""
+    global vis, pcd, visualization_running
+    
+    try:
+        print("Setting up Open3D visualization...")
+        vis = o3d.visualization.Visualizer()
+        vis.create_window("Go2 Lidar 3D Point Cloud", width=1200, height=800)
+        
+        # Set rendering options for larger points
+        opt = vis.get_render_option()
+        opt.point_size = 4.0  # Make points larger
+        opt.background_color = np.asarray([0.1, 0.1, 0.1])  # Dark background
+        opt.show_coordinate_frame = True
+        
+        # Create initial empty point cloud (will be reused)
+        pcd = o3d.geometry.PointCloud()
+        vis.add_geometry(pcd)
+        
+        # Set view with much more zoom out capability
+        ctr = vis.get_view_control()
+        ctr.set_front([-1, 1, -1])
+        ctr.set_lookat([0, 0, 0])
+        ctr.set_up([0, -1, 0])
+        ctr.set_zoom(0.001)  # Even more zoom out
+        
+        # Add coordinate frame - make it much larger to match the scale
+        coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=50.0)  # Much larger coordinate frame
+        vis.add_geometry(coord_frame)
+        
+        visualization_running = True
+        print("Open3D visualization window created successfully.")
+        print("Point size set to: 4.0")
+        print("Press 'q' to close the window.")
+        print("Use mouse wheel to zoom in/out, drag to rotate, right-click to pan")
+        print("The view will automatically adjust to show all LIDAR data")
+        
+        # Test the window is working
+        vis.poll_events()
+        vis.update_renderer()
+        
+    except Exception as e:
+        print(f"Error setting up visualization: {e}")
+        visualization_running = False
+        raise
+
+def calculate_data_extent(points):
+    """Calculate the full extent of the point cloud data."""
+    if len(points) == 0:
+        return None
+    
+    min_coords = np.min(points, axis=0)
+    max_coords = np.max(points, axis=0)
+    center = (min_coords + max_coords) / 2
+    extent = max_coords - min_coords
+    max_extent = np.max(extent)
+    
+    # Suppressed debug messages
+    # print(f"Data extent: X[{min_coords[0]:.2f}, {max_coords[0]:.2f}], Y[{min_coords[1]:.2f}, {max_coords[1]:.2f}], Z[{min_coords[2]:.2f}, {max_coords[2]:.2f}]")
+    # print(f"Center: {center}")
+    # print(f"Max extent: {max_extent:.2f}")
+    
+    return {
+        'min': min_coords,
+        'max': max_coords,
+        'center': center,
+        'extent': extent,
+        'max_extent': max_extent
+    }
+
+def rotate_points(points, x_angle, z_angle):
+    """Rotate points around the x and z axes by given angles."""
+    rotation_matrix_x = np.array([
+        [1, 0, 0],
+        [0, np.cos(x_angle), -np.sin(x_angle)],
+        [0, np.sin(x_angle), np.cos(x_angle)]
+    ])
+    
+    rotation_matrix_z = np.array([
+        [np.cos(z_angle), -np.sin(z_angle), 0],
+        [np.sin(z_angle), np.cos(z_angle), 0],
+        [0, 0, 1]
+    ])
+    
+    points = points @ rotation_matrix_x.T
+    points = points @ rotation_matrix_z.T
+    return points
+
 def main():
     frame_q = Queue()
     lidar_q = Queue()
@@ -88,136 +277,60 @@ def main():
     t = threading.Thread(target=run_loop, args=(loop,), daemon=True)
     t.start()
 
-    # Setup Open3D for 3D lidar visualization
-    print("Creating Open3D visualizer...")
-    vis = o3d.visualization.Visualizer()
-    vis.create_window("Go2 Lidar 3D Point Cloud", width=800, height=600, left=50, top=50)
-    print("Open3D window created")
+    # Setup Open3D visualization
+    setup_visualization()
     
-    # Create initial point cloud
-    pcd = o3d.geometry.PointCloud()
-    vis.add_geometry(pcd)
-    print("Added point cloud geometry")
-    
-    # Set initial view for voxel grid coordinates
-    ctr = vis.get_view_control()
-    ctr.set_front([0, 0, -1])
-    ctr.set_lookat([64, 64, 20])  # Center of the voxel grid
-    ctr.set_up([0, -1, 0])
-    ctr.set_zoom(0.01)  # Much smaller zoom for large coordinate ranges
-    print("Set initial camera view")
-    
-    # Add some test points to verify visualization works
-    test_points = np.array([
-        [64, 64, 20],  # Center point
-        [64, 64, 25],  # Above center
-        [64, 64, 15],  # Below center
-        [74, 64, 20],  # Right of center
-        [54, 64, 20],  # Left of center
-        [64, 74, 20],  # Forward of center
-        [64, 54, 20],  # Back of center
-    ], dtype=np.float32)
-    pcd.points = o3d.utility.Vector3dVector(test_points)
-    pcd.colors = o3d.utility.Vector3dVector(np.ones((len(test_points), 3)) * 0.5)
-    vis.update_geometry(pcd)
-    vis.poll_events()
-    vis.update_renderer()
-    print("Added test points to verify visualization")
-    
-    # Force a render to make sure the window shows something
-    vis.poll_events()
-    vis.update_renderer()
-    print("Forced initial render")
-    
-    # Also create a simple matplotlib fallback window
-    plt.ion()
-    fig_2d, ax_2d = plt.subplots(figsize=(8, 6))
-    ax_2d.set_xlabel('X')
-    ax_2d.set_ylabel('Y')
-    ax_2d.set_title('Go2 Lidar 2D View (Fallback)')
-    ax_2d.grid(True, alpha=0.3)
-    scatter_2d = ax_2d.scatter([], [], c=[], cmap='viridis', s=1, alpha=0.7)
-    plt.colorbar(scatter_2d, ax=ax_2d, label='Height (Z)')
-    print("Created matplotlib fallback window")
-    
-    # Force the Open3D window to be visible
-    print("Forcing Open3D window to be visible...")
-    vis.poll_events()
-    vis.update_renderer()
-    time.sleep(0.1)  # Give it time to render
-    print("Open3D window should now be visible")
-    
-
     # Simple OpenCV viewer + HUD
-    h, w = 720, 1280
+    h, w = 480, 640  # Reduced from 720x1280 to 480x640
     cv2.namedWindow("Go2 Video", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Go2 Video", w, h)  # Explicitly set window size
     blank = np.zeros((h, w, 3), np.uint8)
     first = True
     
     def update_lidar_plot():
         if not lidar_q.empty():
             points = lidar_q.get()
-            print(f"Processing {len(points)} points in update_lidar_plot")
+            # print(f"Processing {len(points)} points in update_lidar_plot")  # Suppressed debug message
             if len(points) > 0:
-                # Debug: show point ranges
-                print(f"Point ranges - X: [{points[:, 0].min():.2f}, {points[:, 0].max():.2f}]")
-                print(f"Point ranges - Y: [{points[:, 1].min():.2f}, {points[:, 1].max():.2f}]")
-                print(f"Point ranges - Z: [{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
+                # Debug: show point ranges (suppressed)
+                # print(f"Point ranges - X: [{points[:, 0].min():.2f}, {points[:, 0].max():.2f}]")
+                # print(f"Point ranges - Y: [{points[:, 1].min():.2f}, {points[:, 1].max():.2f}]")
+                # print(f"Point ranges - Z: [{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
                 
-                # For voxel grid coordinates, use appropriate filtering
-                mask = (points[:, 0] >= 0) & (points[:, 0] <= 128) & (points[:, 1] >= 0) & (points[:, 1] <= 128) & (points[:, 2] >= 0) & (points[:, 2] <= 50)
-                filtered_points = points[mask]
-                print(f"After filtering: {len(filtered_points)} points")
+                # Process points using the Open3D functions
+                # Rotate points
+                rotated_points = rotate_points(points, ROTATE_X_ANGLE, ROTATE_Z_ANGLE)
                 
-                if len(filtered_points) > 0:
-                    # Update point cloud geometry
-                    pcd.points = o3d.utility.Vector3dVector(filtered_points)
+                # Filter points if needed (you can adjust these values)
+                minYValue = 0
+                maxYValue = 100
+                if len(rotated_points) > 0:
+                    filtered_points = rotated_points[(rotated_points[:, 1] >= minYValue) & (rotated_points[:, 1] <= maxYValue)]
                     
-                    # Color points by height (Z coordinate) for better visualization
-                    colors = np.zeros((len(filtered_points), 3))
-                    z_normalized = (filtered_points[:, 2] - filtered_points[:, 2].min()) / (filtered_points[:, 2].max() - filtered_points[:, 2].min() + 1e-6)
-                    colors[:, 0] = z_normalized  # Red channel based on height
-                    colors[:, 1] = 1 - z_normalized  # Green channel (inverse height)
-                    colors[:, 2] = 0.3  # Blue channel constant
-                    pcd.colors = o3d.utility.Vector3dVector(colors)
-                    
-                    # Update visualization
-                    vis.update_geometry(pcd)
-                    vis.poll_events()
-                    vis.update_renderer()
-                    print(f"Updated visualization with {len(filtered_points)} points")
-                    
-                    # Also update matplotlib fallback
-                    scatter_2d.set_offsets(filtered_points[:, :2])
-                    scatter_2d.set_array(filtered_points[:, 2])
-                    fig_2d.canvas.draw()
-                    fig_2d.canvas.flush_events()
-                    print(f"Updated matplotlib fallback with {len(filtered_points)} points")
+                    # Only center if we have points
+                    if len(filtered_points) > 0:
+                        center_x = float(np.mean(filtered_points[:, 0]))
+                        center_y = float(np.mean(filtered_points[:, 1]))
+                        center_z = float(np.mean(filtered_points[:, 2]))
+                        offset_points = filtered_points - np.array([center_x, center_y, center_z])
+                    else:
+                        offset_points = filtered_points
                 else:
-                    print("No points after filtering - trying without any filtering")
-                    # Try without filtering as a fallback
-                    pcd.points = o3d.utility.Vector3dVector(points)
-                    z_normalized = (points[:, 2] - points[:, 2].min()) / (points[:, 2].max() - points[:, 2].min() + 1e-6)
-                    colors = np.zeros((len(points), 3))
-                    colors[:, 0] = z_normalized
-                    colors[:, 1] = 1 - z_normalized
-                    colors[:, 2] = 0.3
-                    pcd.colors = o3d.utility.Vector3dVector(colors)
-                    vis.update_geometry(pcd)
-                    vis.poll_events()
-                    vis.update_renderer()
-                    print(f"Updated visualization with {len(points)} unfiltered points")
-                    
-                    # Also update matplotlib fallback
-                    scatter_2d.set_offsets(points[:, :2])
-                    scatter_2d.set_array(points[:, 2])
-                    fig_2d.canvas.draw()
-                    fig_2d.canvas.flush_events()
-                    print(f"Updated matplotlib fallback with {len(points)} unfiltered points")
+                    offset_points = rotated_points
+                
+                # Calculate scalars for coloring
+                scalars = np.linalg.norm(offset_points, axis=1)
+                
+                # Update Open3D visualization
+                update_visualization(offset_points, scalars)
+                
+                # print(f"Updated visualization with {len(offset_points)} processed points")  # Suppressed debug message
             else:
-                print("No points to process")
+                # print("No points to process")  # Suppressed debug message
+                pass
         else:
-            print("No lidar data in queue")
+            # print("No lidar data in queue")  # Suppressed debug message
+            pass
     
     try:
         while True:
@@ -237,13 +350,11 @@ def main():
             # Update lidar plot
             update_lidar_plot()
             
-            # Also update Open3D window periodically
+            # Update Open3D window
             try:
-                vis.poll_events()
-                vis.update_renderer()
-                # Check if window is still valid
-                if not vis.poll_events():
-                    print("Open3D window may have been closed")
+                if vis and visualization_running:
+                    vis.poll_events()
+                    vis.update_renderer()
             except Exception as e:
                 print(f"Open3D update error: {e}")
             
@@ -252,8 +363,8 @@ def main():
             time.sleep(0.005)
     finally:
         cv2.destroyAllWindows()
-        vis.destroy_window()
-        plt.close('all')
+        if vis:
+            vis.destroy_window()
         loop.call_soon_threadsafe(loop.stop)
         t.join()
 
