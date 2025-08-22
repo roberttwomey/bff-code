@@ -339,156 +339,272 @@ def start_webrtc_video():
 
 @app.route("/")
 def index():
-    # HTML template with floating LowState and Video subwindows over the 3D pointcloud view
     return render_template_string("""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
-        <title>LIDAR, LowState & Video Viewer</title>
+        <meta charset="UTF-8">
+        <title>LIDAR Viz v{{ version }}</title>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
         <style>
             body { margin: 0; overflow: hidden; }
             #three-canvas { width: 100vw; height: 100vh; display: block; }
-            #lowstate-window {
-                position: fixed;
-                top: 24px;
-                right: 24px;
-                width: 340px;
-                background: rgba(34,34,34,0.97);
-                color: #eee;
-                border-radius: 10px;
-                box-shadow: 0 4px 24px #0008;
-                padding: 18px 18px 12px 18px;
-                z-index: 1000;
-                font-family: monospace;
-                font-size: 14px;
-                max-height: 80vh;
-                overflow-y: auto;
-            }
-            #lowstate-window h2 {
-                margin-top: 0;
-                font-size: 1.2em;
-                color: #ffb300;
-            }
-            #lowstate-window table {
-                border-collapse: collapse;
-                width: 100%;
-                margin-bottom: 8px;
-            }
-            #lowstate-window th, #lowstate-window td {
-                border: 1px solid #888;
-                padding: 2px 6px;
-                text-align: center;
-            }
-            #video-window {
-                position: fixed;
-                bottom: 24px;
-                right: 24px;
-                width: 340px;
-                background: rgba(20,20,20,0.97);
-                color: #eee;
-                border-radius: 10px;
-                box-shadow: 0 4px 24px #0008;
-                padding: 10px;
-                z-index: 1000;
-                text-align: center;
-            }
-            #video-window h2 {
-                margin: 0 0 8px 0;
-                font-size: 1.1em;
-                color: #90caf9;
-            }
-            #video-frame {
-                width: 320px;
-                height: 240px;
-                background: #111;
-                border-radius: 6px;
-                object-fit: contain;
-            }
         </style>
     </head>
     <body>
-        <div id="lowstate-window">
-            <h2>Go2 Robot Status (LowState)</h2>
-            <div id="lowstate-content">Waiting for data...</div>
-        </div>
-        <div id="video-window">
-            <h2>Go2 Camera Stream</h2>
-            <img id="video-frame" src="" alt="Video stream will appear here"/>
-        </div>
         <canvas id="three-canvas"></canvas>
         <script>
-            // --- LowState display ---
-            var socket = io();
-            socket.on("lowstate_data", function(data) {
-                let html = "";
-                if(data.error) {
-                    html = "<b>Error:</b> " + data.error;
-                } else {
-                    html += "<b>IMU RPY:</b> " + data.imu_rpy.join(", ") + "<br>";
-                    html += "<b>Motors:</b><br><table><tr><th>#</th><th>q</th><th>Temp</th><th>Lost</th></tr>";
-                    data.motors.forEach((m, i) => {
-                        html += `<tr><td>${i+1}</td><td>${m.q}</td><td>${m.temperature}°C</td><td>${m.lost}</td></tr>`;
+            let scene, camera, renderer, controls, pointCloud, voxelMesh;
+            let voxelSize = 1.0;
+            let transparency = .5;
+            let wireframe = false;
+            let lightIntensity = .5;
+            let pointCloudEnable = 1;
+            let pollingInterval;
+            const socket = io();
+
+                                  
+            document.addEventListener("DOMContentLoaded", () => {                                 
+                function init() {
+                    // Initialize the scene
+                    const scene = new THREE.Scene();
+                    scene.background = new THREE.Color(0x333333);
+
+                    const sceneRotationDegrees = -90;  // Change this to any angle (e.g., 90, 180, -90)
+                    scene.rotation.y = THREE.MathUtils.degToRad(sceneRotationDegrees); // Convert to radians
+
+                    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+                    camera.position.set(-100, 100, -100); // Adjust camera for rotated scene
+                    camera.lookAt(0, 0, 0); // Ensure it's looking at the center
+
+                    // Initialize the renderer
+                    // const renderer = new THREE.WebGLRenderer({ antialias: true });
+                    let renderer = new THREE.WebGLRenderer({canvas: document.getElementById('three-canvas'), antialias: true});
+
+                    renderer.setSize(window.innerWidth, window.innerHeight);
+                    document.body.appendChild(renderer.domElement);
+
+                    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+                    controls.target.set(0, 0, 0); // Ensure the rotation works around the center
+                    controls.enableDamping = true; // Smooth movement
+                    controls.dampingFactor = 0.05;
+                    controls.maxPolarAngle = Math.PI; // Allow full rotation
+                    controls.screenSpacePanning = true;
+                    controls.update();
+
+                    const ambientLight = new THREE.AmbientLight(0x555555, 0.5); // Soft background light
+                    scene.add(ambientLight);
+
+                    const directionalLight = new THREE.DirectionalLight(0xffffff, 1); // Main light source
+                    directionalLight.position.set(0, 100, 0); // Position above the scene
+                    directionalLight.castShadow = true;
+                    scene.add(directionalLight);
+
+                    const axesHelper = new THREE.AxesHelper(5);
+                    scene.add(axesHelper);
+                                                                                                                              
+                    socket.on("connect", () => {
+                        console.log("Socket connected...");
+                        pollArgs();
                     });
-                    html += "</table>";
-                    html += "<b>BMS:</b> Version " + data.bms.version + ", SOC: " + data.bms.soc + "%, Current: " + data.bms.current + "mA, Cycle: " + data.bms.cycle + "<br>";
-                    html += "BQ NTC: " + data.bms.bq_ntc + "°C, MCU NTC: " + data.bms.mcu_ntc + "°C<br>";
-                    html += "<b>Foot Force:</b> " + JSON.stringify(data.foot_force) + "<br>";
-                    html += "<b>Temperature NTC1:</b> " + data.temperature_ntc1 + "°C<br>";
-                    html += "<b>Power Voltage:</b> " + data.power_v + "V<br>";
+                                  
+                    socket.on("check_args_ack", (data) => {
+                        console.log("Received check_args event:", data);
+                         const typeFlag = parseInt(data.type, 2);                         
+                        if (typeFlag & 0b0001) {  
+                            camera.position.set(-100, 100, -100); // Adjust camera for rotated scene
+                            camera.lookAt(0, 0, 0); // Ensure it's looking at the center
+                        }
+                        if (typeFlag & 0b0010) {  
+                            camera.position.set(0, 0, 10); // Set camera at the center of the scene
+                            camera.lookAt(0, 0, -1); // Look slightly forward       
+                         }
+                        if (typeFlag & 0b0100) {  
+                            pointCloudEnable = 1;
+                            console.log("ptcloud:", pointCloudEnable);
+                        }
+                        if (typeFlag & 0b1000) {  
+                            pointCloudEnable = 0;
+                            console.log("ptcloud:", pointCloudEnable);
+                        }
+                        controls.update();
+                        clearInterval(pollingInterval);
+                     });
+                                  
+                    // Handle LIDAR data
+                    socket.on("lidar_data", (data) => {
+                        if (!data.handled) {
+                            data.handled = true; // Prevent re-triggering
+                            console.log("Received LIDAR data");
+                            const points = data.points || [];
+                            const scalars = data.scalars || [];
+
+                            if (pointCloudEnable > 0) {
+                                if (pointCloud) scene.remove(pointCloud);
+                                if (voxelMesh) {
+                                    scene.remove(voxelMesh);
+                                    voxelMesh = null;
+                                }
+
+                                const geometry = new THREE.BufferGeometry();
+                                const vertices = new Float32Array(points.flat());
+                                geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+
+                                const colors = new Float32Array(scalars.length * 3);
+                                const maxScalar = Math.max.apply(null, scalars);
+                                scalars.forEach((scalar, i) => {
+                                    const color = new THREE.Color();
+                                    color.setHSL(scalar / maxScalar, 1.0, 0.5);
+                                    colors.set([color.r, color.g, color.b], i * 3);
+                                });
+
+                                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+                                //const material = new THREE.PointsMaterial({ size: 0.3, vertexColors: true });
+                                const material = new THREE.PointsMaterial({ size: 1.0, vertexColors: true });
+                                pointCloud = new THREE.Points(geometry, material);
+
+                                scene.add(pointCloud);
+                            } else {
+                                if (voxelMesh) scene.remove(voxelMesh);
+                                voxelMesh = createVoxelMesh(points, scalars, voxelSize, Infinity);
+                                if (voxelMesh instanceof THREE.Object3D) {
+                                    scene.add(voxelMesh);
+                                }
+                                // Remove any existing point cloud
+                                if (pointCloud) {
+                                    scene.remove(pointCloud);
+                                    pointCloud = null;
+                                }
+                            }
+                        }
+                    });
+
+                    function animate() {
+                        requestAnimationFrame(animate);
+                        controls.update();
+                        renderer.render(scene, camera);
+                    }
+
+                    animate();
                 }
-                document.getElementById("lowstate-content").innerHTML = html;
+
+                init();
             });
 
-            // --- Video display ---
-            socket.on("video_frame", function(data) {
-                if(data.image) {
-                    document.getElementById("video-frame").src = "data:image/jpeg;base64," + data.image;
-                }
-            });
+            function pollArgs() {
+                pollingInterval = setInterval(() => {
+                    socket.emit('check_args');
+                }, 1000); // Poll every second
+            }                     
+                                     
+            /**
+            * Creates a voxel mesh from point data and scalar data.
+            */
+            function createVoxelMesh(points, scalars, voxelSize, maxVoxelsToShow = Infinity) {
+                const geometry = new THREE.BufferGeometry();
 
-            // --- 3D Pointcloud viewer (minimal setup, you can expand as needed) ---
-            let scene = new THREE.Scene();
-            let camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-            let renderer = new THREE.WebGLRenderer({canvas: document.getElementById('three-canvas'), antialias: true});
-            renderer.setClearColor(0x111111);
-            renderer.setSize(window.innerWidth, window.innerHeight);
+                try {
+                    // Precompute cube vertex offsets
+                    const halfSize = voxelSize / 2;
+                    const cubeVertexOffsets = [
+                        [-halfSize, -halfSize, -halfSize],
+                        [halfSize, -halfSize, -halfSize],
+                        [halfSize, halfSize, -halfSize],
+                        [-halfSize, halfSize, -halfSize],
+                        [-halfSize, -halfSize, halfSize],
+                        [halfSize, -halfSize, halfSize],
+                        [halfSize, halfSize, halfSize],
+                        [-halfSize, halfSize, halfSize]
+                    ];
 
-            let controls = new THREE.OrbitControls(camera, renderer.domElement);
-            camera.position.set(0, 0, 5);
-            controls.update();
+                    // Precompute indices for a unit cube
+                    const cubeIndices = [
+                        0, 1, 2, 2, 3, 0, // Back
+                        4, 5, 6, 6, 7, 4, // Front
+                        0, 1, 5, 5, 4, 0, // Bottom
+                        2, 3, 7, 7, 6, 2, // Top
+                        0, 3, 7, 7, 4, 0, // Left
+                        1, 2, 6, 6, 5, 1  // Right
+                    ];
 
-            let pointCloud = null;
+                    const maxVoxels = Math.min(maxVoxelsToShow, points.length);
+                    const maxScalar = Math.max(...scalars);
 
-            function render() {
-                requestAnimationFrame(render);
-                controls.update();
-                renderer.render(scene, camera);
+                    // Typed arrays for better performance
+                    const positions = new Float32Array(maxVoxels * 8 * 3); // 8 vertices * 3 coords per voxel
+                    const colors = new Float32Array(maxVoxels * 8 * 3);    // 8 vertices * 3 color channels per voxel
+                    const indices = new Uint32Array(maxVoxels * 36);       // 12 triangles (36 indices) per voxel
+
+                    let positionOffset = 0;
+                    let colorOffset = 0;
+                    let indexOffset = 0;
+
+                    for (let i = 0; i < maxVoxels; i++) {
+                        const centerX = points[i][0];
+                        const centerY = points[i][1];
+                        const centerZ = points[i][2];
+
+                        // Compute color based on scalar
+                        const normalizedScalar = scalars[i] / maxScalar;
+                        const color = new THREE.Color();
+                        color.setHSL(normalizedScalar * 0.7, 1.0, 0.5);
+
+                        // Add vertices and colors
+                        for (let j = 0; j < 8; j++) {
+                            const [dx, dy, dz] = cubeVertexOffsets[j];
+                            positions[positionOffset++] = centerX + dx;
+                            positions[positionOffset++] = centerY + dy;
+                            positions[positionOffset++] = centerZ + dz;
+
+                            colors[colorOffset++] = color.r;
+                            colors[colorOffset++] = color.g;
+                            colors[colorOffset++] = color.b;
+                        }
+
+                        // Add indices with offsets
+                        for (let j = 0; j < cubeIndices.length; j++) {
+                            indices[indexOffset++] = cubeIndices[j] + i * 8;
+                        }
+                    }
+
+                    // Set attributes and indices in the geometry
+                    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+                    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+                    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+
+                    } catch (error) {
+                                  THREE.Cache.clear();
+                        if (error instanceof RangeError) {
+                            console.error("🚨 Array buffer allocation failed:", error);
+
+                            // Clear existing memory to free up space
+                            THREE.Cache.clear();
+
+                            // Optional: Trigger garbage collection (only works in Chrome DevTools)
+                            if (window.gc) window.gc();
+
+                            // Return an empty geometry to prevent further errors
+                            return new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+                        } else {
+                            throw error;  // Re-throw other errors
+                        }
+                    }
+
+                // Create the material
+                const material = new THREE.MeshBasicMaterial({
+                    vertexColors: true,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                    opacity: transparency,
+                    wireframe: wireframe
+                });
+
+                // Return the voxel mesh
+                return new THREE.Mesh(geometry, material);
             }
-            render();
-
-            socket.on("lidar_data", function(data) {
-                if (!data.points) return;
-                if (pointCloud) {
-                    scene.remove(pointCloud);
-                }
-                let geometry = new THREE.BufferGeometry();
-                let positions = new Float32Array(data.points.flat());
-                geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                let colors = new Float32Array(data.scalars.map(s => [s/10, 0.5, 1-s/10]).flat());
-                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-                let material = new THREE.PointsMaterial({size: 0.05, vertexColors: true});
-                pointCloud = new THREE.Points(geometry, material);
-                scene.add(pointCloud);
-            });
-
-            window.addEventListener('resize', function() {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
         </script>
     </body>
     </html>
