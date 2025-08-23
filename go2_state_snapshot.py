@@ -48,10 +48,14 @@ def create_motor_state_overlay(img, motor_state):
     return img
 
 # ========== Periodic snapshotter ==========
-def start_periodic_snapshot(get_frame_fn, get_state_fn, out_dir="snapshots", base_name="go2_snap", interval=5.0):
+def start_periodic_snapshot(get_frame_fn, get_state_fn, get_points_fn=None,
+                            out_dir="snapshots", base_name="go2_snap", interval=5.0):
     """
-    Periodically saves a JPG of the latest frame + a JSON manifest with motor_state + full low_state.
-    Returns a threading.Event you can .set() to stop the thread cleanly.
+    Periodically saves:
+      - JPG of latest frame
+      - JSON manifest (imu_rpy, soc, power_v, motor_state, full low_state, file paths)
+      - PLY of latest LiDAR points (if available)
+    Returns threading.Event you can .set() to stop.
     """
     os.makedirs(out_dir, exist_ok=True)
     stop_flag = threading.Event()
@@ -60,13 +64,16 @@ def start_periodic_snapshot(get_frame_fn, get_state_fn, out_dir="snapshots", bas
         while not stop_flag.is_set():
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
-            # Pull current frame and state
+            # Pull current frame, state, and points
             img = get_frame_fn()
             state = get_state_fn() or {}
+            pts = get_points_fn().copy() if (get_points_fn is not None and get_points_fn() is not None) else None
 
             # Filepaths
-            jpg_path = os.path.join(out_dir, f"{base_name}_{ts}.jpg")
-            json_path = os.path.join(out_dir, f"{base_name}_{ts}.json")
+            base = f"{base_name}_{ts}"
+            jpg_path = os.path.join(out_dir, f"{base}.jpg")
+            ply_path = os.path.join(out_dir, f"{base}.ply")
+            json_path = os.path.join(out_dir, f"{base}.json")
 
             # Save JPEG if we have a frame
             if img is not None:
@@ -78,17 +85,28 @@ def start_periodic_snapshot(get_frame_fn, get_state_fn, out_dir="snapshots", bas
             else:
                 jpg_path = None
 
+            # Save PLY if we have points
+            if pts is not None and pts.size >= 3:
+                try:
+                    write_ply_xyz(ply_path, pts)
+                except Exception as e:
+                    print(f"[snapshot] Failed to write PLY: {e}")
+                    ply_path = None
+            else:
+                ply_path = None
+
             # JSON manifest
             manifest = {
                 "timestamp_utc": ts,
-                "files": {"photo_jpg": jpg_path},
-                # Quick access fields:
+                "files": {
+                    "photo_jpg": jpg_path,
+                    "pointcloud_ply": ply_path,
+                },
                 "imu_rpy": state.get("imu"),
                 "soc": state.get("soc"),
                 "power_v": state.get("power_v"),
-                # Detailed state:
                 "motor_state": state.get("motor_state", []),
-                "low_state": state.get("low_state"),  # full LowState payload
+                "low_state": state.get("low_state"),
             }
             try:
                 with open(json_path, "w") as f:
@@ -101,6 +119,7 @@ def start_periodic_snapshot(get_frame_fn, get_state_fn, out_dir="snapshots", bas
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     return stop_flag
+
 
 # Open3D visualization variables
 vis = None
@@ -272,6 +291,28 @@ def rotate_points(points, x_angle, z_angle):
     points = points @ rotation_matrix_z.T
     return points
 
+def write_ply_xyz(filepath, points: np.ndarray):
+    """
+    Save Nx3 float32 points (x,y,z) to ASCII PLY.
+    """
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.ndim != 2 or pts.shape[1] < 3:
+        raise ValueError("points must be Nx3")
+    n = pts.shape[0]
+    header = (
+        "ply\n"
+        "format ascii 1.0\n"
+        f"element vertex {n}\n"
+        "property float x\n"
+        "property float y\n"
+        "property float z\n"
+        "end_header\n"
+    )
+    with open(filepath, "w") as f:
+        f.write(header)
+        for x, y, z in pts[:, :3]:
+            f.write(f"{x} {y} {z}\n")
+
 def main():
     frame_q = Queue()
     lidar_q = Queue()
@@ -287,6 +328,9 @@ def main():
     last_frame_lock = threading.Lock()
     last_frame_holder = {"img": None}  # store latest BGR image here
     
+    last_points_lock = threading.Lock()
+    last_points_holder = {"pts": None} # store latest point cloud here
+
     # ==== Connection ====
     # Update the IP/method to match your setup
     conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="192.168.4.30")
@@ -371,6 +415,8 @@ def main():
                 points = np.array([positions[i:i+3] for i in range(0, len(positions), 3)], dtype=np.float32)
                 if not lidar_q.full():
                     lidar_q.put(points)
+                with last_points_lock:
+                    last_points_holder["pts"] = points.copy()
         except Exception as e:
             print(f"Lidar callback error: {e}")
             import traceback
@@ -412,12 +458,18 @@ def main():
     def _get_current_state():
         return dict(latest_state)
 
+    def _get_current_points():
+        with last_points_lock:
+            pts = last_points_holder["pts"]
+            return None if pts is None else pts.copy()
+
     snapshot_stop = start_periodic_snapshot(
         get_frame_fn=_get_current_frame,
         get_state_fn=_get_current_state,
+        get_points_fn=_get_current_points,  # << NEW
         out_dir="snapshots",
         base_name="go2",
-        interval=30.0,
+        interval=5.0,
     )
     # -----------------------------------------------
 

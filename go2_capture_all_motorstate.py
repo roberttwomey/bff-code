@@ -34,7 +34,7 @@ def create_motor_state_overlay(img, motor_state):
             color = (0, 0, 255)  # Red
 
         # Format motor info
-        motor_text = f"M{i+1}: {motor['q']:.2f}° {temp}°C"
+        motor_text = f"M{i+1}: {motor['q']:2f} {temp} C"
         if motor['lost']:
             motor_text += " [LOST]"
             color = (0, 0, 255)  # Red if lost
@@ -152,7 +152,7 @@ def setup_visualization():
     try:
         print("Setting up Open3D visualization...")
         vis = o3d.visualization.Visualizer()
-        vis.create_window("Go2 Lidar 3D Point Cloud", width=1200, height=800)
+        vis.create_window("Go2 Lidar 3D Point Cloud", width=1200, height=800, left=0, top=0)
         
         # Set rendering options for larger points
         opt = vis.get_render_option()
@@ -380,6 +380,7 @@ def main():
     h, w = 360, 640  # Reduced from 720x1280 to 480x640
     cv2.namedWindow("Go2 Video", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Go2 Video", w, h)  # Explicitly set window size
+    cv2.moveWindow("Go2 Video", 600, 0)
     blank = np.zeros((h, w, 3), np.uint8)
     first = True
     
