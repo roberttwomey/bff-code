@@ -10,19 +10,31 @@ from PIL import Image
 # Official OpenAI SDK (Responses API)
 # pip install openai>=1.40
 from openai import OpenAI
+# import json
+import dotenv
 
 # =============== Config ===============
+dotenv.load_dotenv()  # take environment variables from .env.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+# with open("config.json", "r") as f:
+    # config = json.load(f)
 SNAPSHOT_DIR = os.environ.get("GO2_SNAPSHOT_DIR", "snapshots")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")  # vision-capable, efficient
-SYSTEM_PROMPT = """You are Snapper’s embodied co‑pilot. Merge proprioception (IMU, motors, battery)
-with exteroception (camera + LiDAR-derived depth map) to talk about:
-- what the robot is seeing and where it might be
-- how its body feels (temperatures, voltage, balance)
-- safety/affordances (terrain/obstacles)
-Be concrete. If uncertain, say what extra sensing/action would reduce uncertainty."""
+# SYSTEM_PROMPT = """You are Snapper’s embodied co‑pilot. Merge proprioception (IMU, motors, battery)
+# with exteroception (camera + LiDAR-derived depth map) to talk about:
+# - what the robot is seeing and where it might be
+# - how its body feels (temperatures, voltage, balance)
+# - safety/affordances (terrain/obstacles)
+# Be concrete. If uncertain, say what extra sensing/action would reduce uncertainty."""
+
+SYSTEM_PROMPT = """You are Snapper, an embodied AI in a robot dog. Use body state (proprioception through IMU, motors, battery)
+and environment (through exteroception with camera and LIDAR point cloud) to converse with the user. Do not speculate about
+what has happened outside your sensory inputs. Do not communicate like a helpful assistant, you are just having a conversation
+as a reliable partner, companion, or human's best friend."""
 
 # Depth-map rendering parameters
-DEPTH_IMG_SIZE = (512, 512)     # (width, height) of the depth map image
+DEPTH_IMG_SIZE = (128, 128)     # (width, height) of the depth map image
 DEPTH_CROP_PAD = 1.05           # add 5% padding around XY bounds so edges aren't clipped
 NEAR_BIAS = 0.0                 # meters (clamp)
 FAR_BIAS = 0.0                  # meters (extra headroom)
@@ -42,8 +54,6 @@ def latest_snapshot_pair(folder: str) -> Tuple[Optional[Path], Optional[Dict[str
         data = json.load(f)
     img_rel = data.get("files", {}).get("photo_jpg")
     img_path = Path(img_rel) if img_rel else None
-    # if img_path and not img_path.is_absolute():
-        # img_path = (json_path.parent / img_path).resolve()
     return json_path, data, img_path
 
 def find_pointcloud_for_snapshot(snapshot_json: Dict[str, Any], folder: Path) -> Optional[Path]:
@@ -122,80 +132,140 @@ def load_ply_points(ply_path: Path) -> np.ndarray:
             return pts
 
 # =============== Depth-map rendering (top-down) ===============
+# def render_topdown_depth(points: np.ndarray,
+#                          img_size=(112, 112),
+#                          crop_pad: float = 1.05,
+#                          near_bias: float = 0.0,
+#                          far_bias: float = 0.0) -> Image.Image:
+#     """
+#     Make a bird's-eye depth image (top-down XY grid, value = nearest range r).
+#     - points: Nx3 in meters (x,y,z) in robot frame (any frame is fine for overview).
+#     - depth value: r = sqrt(x^2 + y^2 + z^2) per grid cell; we keep the MIN (closest).
+#     - Returns an 8-bit grayscale PIL Image (near=bright, far=dark).
+#     """
+#     if points.size == 0:
+#         return Image.new("L", img_size, 0)
+
+#     # Compute bounds in X,Y to define raster grid
+#     x = points[:, 0]
+#     y = points[:, 1]
+#     z = points[:, 2]
+#     r = np.sqrt(x*x + y*y + z*z)
+
+#     xmin, xmax = np.min(x), np.max(x)
+#     ymin, ymax = np.min(y), np.max(y)
+
+#     # Pad bounds a bit so edges aren't cropped
+#     x_center = 0.5 * (xmin + xmax)
+#     y_center = 0.5 * (ymin + ymax)
+#     x_half = 0.5 * (xmax - xmin) * crop_pad
+#     y_half = 0.5 * (ymax - ymin) * crop_pad
+#     xmin, xmax = x_center - x_half, x_center + x_half
+#     ymin, ymax = y_center - y_half, y_center + y_half
+
+#     W, H = img_size
+#     # Map X→u (0..W-1), Y→v (0..H-1), with Y increasing downward (top-down image)
+#     # So larger Y (forward) goes toward lower rows if you prefer; we'll use standard image coords.
+#     # Compute indices
+#     u = ( (x - xmin) / max(1e-6, (xmax - xmin)) * (W - 1) ).astype(np.int32)
+#     v = ( (y - ymin) / max(1e-6, (ymax - ymin)) * (H - 1) ).astype(np.int32)
+
+#     # Clamp within bounds
+#     u = np.clip(u, 0, W - 1)
+#     v = np.clip(v, 0, H - 1)
+
+#     # For each pixel, keep the *closest* range (min r)
+#     depth = np.full((H, W), np.inf, dtype=np.float32)
+#     # vectorized scatter-min
+#     flat_idx = v * W + u
+#     # If multiple points fall into same cell, keep minimum r
+#     # We'll do this by sorting and taking first
+#     order = np.argsort(r)
+#     flat_idx_sorted = flat_idx[order]
+#     r_sorted = r[order]
+#     # unique keeps first occurrence (which now corresponds to MIN r because of sorting)
+#     _, first_pos = np.unique(flat_idx_sorted, return_index=True)
+#     depth_flat = depth.ravel()
+#     depth_flat[flat_idx_sorted[first_pos]] = r_sorted[first_pos]
+#     depth = depth_flat.reshape(H, W)
+
+#     # Handle inf (cells with no points): fill with far max
+#     finite = np.isfinite(depth)
+#     if not np.any(finite):
+#         return Image.new("L", img_size, 0)
+#     dmin = np.min(depth[finite])
+#     dmax = np.max(depth[finite])
+#     dmin = max(0.0, dmin - near_bias)
+#     dmax = dmax + far_bias if far_bias > 0 else dmax
+
+#     # Normalize: near -> bright (255), far -> dark (0)
+#     norm = np.zeros_like(depth, dtype=np.float32)
+#     scale = (dmax - dmin) if (dmax > dmin) else 1.0
+#     norm[finite] = (1.0 - (depth[finite] - dmin) / scale)  # invert
+#     norm[~finite] = 0.0
+
+#     img = (norm * 255.0).astype(np.uint8)
+#     return Image.fromarray(img, mode="L")
+
 def render_topdown_depth(points: np.ndarray,
-                         img_size=(512, 512),
+                         img_size=(128, 128),
                          crop_pad: float = 1.05,
                          near_bias: float = 0.0,
                          far_bias: float = 0.0) -> Image.Image:
     """
-    Make a bird's-eye depth image (top-down XY grid, value = nearest range r).
-    - points: Nx3 in meters (x,y,z) in robot frame (any frame is fine for overview).
-    - depth value: r = sqrt(x^2 + y^2 + z^2) per grid cell; we keep the MIN (closest).
-    - Returns an 8-bit grayscale PIL Image (near=bright, far=dark).
+    Renders a top-down height map from a list of 3D points.
+    x and y are treated as pixel locations, and z as the height.
+
+    Args:
+        points: A list of (x, y, z) tuples.
+
+    Returns:
+        A PIL Image object of the top-down render, or None if no points are given.
     """
     if points.size == 0:
-        return Image.new("L", img_size, 0)
+        return None
 
-    # Compute bounds in X,Y to define raster grid
-    x = points[:, 0]
-    y = points[:, 1]
-    z = points[:, 2]
-    r = np.sqrt(x*x + y*y + z*z)
+    # Convert coordinates to integers for pixel locations
+    int_points = [(int(p[0]), int(p[1]), int(p[2])) for p in points]
 
-    xmin, xmax = np.min(x), np.max(x)
-    ymin, ymax = np.min(y), np.max(y)
+    # Determine the boundaries of the point cloud
+    # min_x = min(p[0] for p in int_points)
+    # max_x = max(p[0] for p in int_points)
+    # min_y = min(p[1] for p in int_points)
+    # max_y = max(p[1] for p in int_points)
+    # min_z = min(p[2] for p in int_points)
+    # max_z = max(p[2] for p in int_points)
 
-    # Pad bounds a bit so edges aren't cropped
-    x_center = 0.5 * (xmin + xmax)
-    y_center = 0.5 * (ymin + ymax)
-    x_half = 0.5 * (xmax - xmin) * crop_pad
-    y_half = 0.5 * (ymax - ymin) * crop_pad
-    xmin, xmax = x_center - x_half, x_center + x_half
-    ymin, ymax = y_center - y_half, y_center + y_half
+    # Calculate image dimensions
+    # width = max_x - min_x + 1
+    # height = max_y - min_y + 1
+    height_map = np.full(img_size, 0, dtype=np.float32)
 
-    W, H = img_size
-    # Map X→u (0..W-1), Y→v (0..H-1), with Y increasing downward (top-down image)
-    # So larger Y (forward) goes toward lower rows if you prefer; we'll use standard image coords.
-    # Compute indices
-    u = ( (x - xmin) / max(1e-6, (xmax - xmin)) * (W - 1) ).astype(np.int32)
-    v = ( (y - ymin) / max(1e-6, (ymax - ymin)) * (H - 1) ).astype(np.int32)
+    # # Populate the height map. For overlapping points, keep the highest z-value.
+    for x, y, z in int_points:
+        if z > height_map[x, y]:
+            height_map[x, y] = z
 
-    # Clamp within bounds
-    u = np.clip(u, 0, W - 1)
-    v = np.clip(v, 0, H - 1)
+    # # Replace -inf with the minimum z-value for normalization
+    # height_map[height_map == -np.inf] = min_z
 
-    # For each pixel, keep the *closest* range (min r)
-    depth = np.full((H, W), np.inf, dtype=np.float32)
-    # vectorized scatter-min
-    flat_idx = v * W + u
-    # If multiple points fall into same cell, keep minimum r
-    # We'll do this by sorting and taking first
-    order = np.argsort(r)
-    flat_idx_sorted = flat_idx[order]
-    r_sorted = r[order]
-    # unique keeps first occurrence (which now corresponds to MIN r because of sorting)
-    _, first_pos = np.unique(flat_idx_sorted, return_index=True)
-    depth_flat = depth.ravel()
-    depth_flat[flat_idx_sorted[first_pos]] = r_sorted[first_pos]
-    depth = depth_flat.reshape(H, W)
+    # # Replace pixels that received no points with the minimum z-value for normalization
+    # height_map[height_map < min_z] = min_z
 
-    # Handle inf (cells with no points): fill with far max
-    finite = np.isfinite(depth)
-    if not np.any(finite):
-        return Image.new("L", img_size, 0)
-    dmin = np.min(depth[finite])
-    dmax = np.max(depth[finite])
-    dmin = max(0.0, dmin - near_bias)
-    dmax = dmax + far_bias if far_bias > 0 else dmax
+    # Normalize the height map to a 0-255 range for an 8-bit grayscale image
+    # if max_z > min_z:
+    #     # Normalize to 0-1 range
+    #     normalized_map = (height_map - min_z) / (max_z - min_z)
 
-    # Normalize: near -> bright (255), far -> dark (0)
-    norm = np.zeros_like(depth, dtype=np.float32)
-    scale = (dmax - dmin) if (dmax > dmin) else 1.0
-    norm[finite] = (1.0 - (depth[finite] - dmin) / scale)  # invert
-    norm[~finite] = 0.0
+    # Create a PIL image. We flip it vertically so that the y-axis points up.
+    # image = Image.fromarray(np.flipud(height_map), 'L')
+    image = Image.fromarray(height_map, 'L')
+    
+    # # Resize to the desired output size for consistency
+    # if img_size:
+    #     image = image.resize(img_size, Image.Resampling.LANCZOS)
 
-    img = (norm * 255.0).astype(np.uint8)
-    return Image.fromarray(img, mode="L")
+    return image
 
 # =============== Encoding helpers ===============
 def encode_image_base64(p: Path) -> str:
@@ -292,7 +362,7 @@ def print_header(json_path: Optional[Path], img_path: Optional[Path], ply_path: 
 
 # =============== Chat Loop ===============
 def main():
-    client = OpenAI()  # reads OPENAI_API_KEY
+    client = OpenAI(api_key=OPENAI_API_KEY)  # reads OPENAI_API_KEY
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Looking for snapshots in: {SNAPSHOT_DIR}")
     js_path, js, img_path = latest_snapshot_pair(SNAPSHOT_DIR)
     if js is None:
@@ -323,6 +393,8 @@ def main():
                 crop_pad=DEPTH_CROP_PAD, near_bias=NEAR_BIAS, far_bias=FAR_BIAS
             )
             lidar_b64 = encode_pil_png_base64(depth_img)
+            # save for inspection
+            depth_img.save("latest_lidar_depth.png")
         except Exception as e:
             print(f"[warn] Could not render LiDAR depth map: {e}")
 

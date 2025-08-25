@@ -2,7 +2,7 @@
 import cv2, numpy as np, asyncio, logging, threading, time, sys, json, os
 from datetime import datetime
 from queue import Queue
-from aiortc import MediaStreamTrack
+from aiortc import MediaStreamTrack, VideoStreamTrack
 from go2_webrtc_driver.webrtc_driver import Go2WebRTCConnection, WebRTCConnectionMethod
 from go2_webrtc_driver.constants import RTC_TOPIC
 import open3d as o3d
@@ -328,7 +328,14 @@ def main():
     last_frame_lock = threading.Lock()
     last_frame_holder = {"img": None}  # store latest BGR image here
     
+    # Separate holder for clean frames (without overlays) for snapshots
+    clean_frame_lock = threading.Lock()
+    clean_frame_holder = {"img": None}  # store clean BGR image for snapshots
+    
     last_points_lock = threading.Lock()
+    last_other_frame_lock = threading.Lock()
+    last_other_frame_holder = {"other_img": None}
+
     last_points_holder = {"pts": None} # store latest point cloud here
 
     # ==== Connection ====
@@ -345,6 +352,17 @@ def main():
                 frame_q.put(img)
             with last_frame_lock:
                 last_frame_holder["img"] = img
+            # Also save clean frame for snapshots (without overlays)
+            with clean_frame_lock:
+                clean_frame_holder["img"] = img.copy()
+
+    async def recv_other_camera_stream(track: MediaStreamTrack):
+        while True:
+            frame = await track.recv()
+            other_img = frame.to_ndarray(format="bgr24")
+
+            with last_other_frame_lock:
+                last_other_frame_holder["other_img"] = other_img
 
     def display_lowstate_data(message):
         # Extracting data from the message
@@ -431,10 +449,16 @@ def main():
             conn.datachannel.pub_sub.subscribe(     # subscribe over DataChannel
                 RTC_TOPIC["LOW_STATE"], lowstate_callback
             )
+
             # Enable lidar stream
             await conn.datachannel.disableTrafficSaving(True)
             conn.datachannel.pub_sub.publish_without_callback("rt/utlidar/switch", "on")
-            
+
+            # Subscribe to the other camera stream (replace with the correct topic)
+            # NOTE: You'll likely need to create the "OTHER_CAMERA" topic in constants.py
+            # and potentially add a new video channel.  This depends on how the Go2 exposes the stream.
+            # conn.video.add_track_callback(recv_other_camera_stream, channel=1) # Example for channel 1
+
             # Subscribe to lidar data
             conn.datachannel.pub_sub.subscribe(
                 "rt/utlidar/voxel_map_compressed", lidar_callback
@@ -451,8 +475,8 @@ def main():
     
     # ---- Start periodic snapshots (every 5 seconds) ----
     def _get_current_frame():
-        with last_frame_lock:
-            img = last_frame_holder["img"]
+        with clean_frame_lock:
+            img = clean_frame_holder["img"]
             return None if img is None else img.copy()
 
     def _get_current_state():
@@ -471,6 +495,10 @@ def main():
         base_name="go2",
         interval=5.0,
     )
+
+
+
+
     # -----------------------------------------------
 
     # Simple OpenCV viewer + HUD
@@ -553,6 +581,10 @@ def main():
             snapshot_stop.set()
         except Exception:
             pass
+
+        # Capture the other image stream in the snapshot
+        with last_other_frame_lock:
+            other_img = last_other_frame_holder["other_img"]
 
         cv2.destroyAllWindows()
         if vis:
