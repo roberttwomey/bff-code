@@ -591,7 +591,7 @@ class HumanFollowerMediaPipe:
                     cv2.circle(frame, (nose_x, nose_y), 3, (0, 255, 255), -1)
     
     def calculate_search_pattern(self):
-        """Calculate search pattern movement - slow left-right rotation with increasing amplitude"""
+        """Calculate search pattern movement - full 360° revolution: 180° left, then 180° right"""
         if self.search_start_time is None:
             self.search_start_time = time.time()
             self.search_time = 0.0
@@ -603,16 +603,37 @@ class HumanFollowerMediaPipe:
         if search_elapsed < self.search_threshold:
             return 0.0, 0.0, 0.0  # No movement during initial wait
         
-        # Calculate search cycle time
-        self.search_time = (search_elapsed - self.search_threshold) % self.search_cycle_time
+        # Calculate time since search pattern started
+        pattern_elapsed = search_elapsed - self.search_threshold
         
-        # Create sinusoidal search pattern (left to right rotation)
-        # Use sine wave to create smooth left-right-left pattern
-        search_rotation = self.search_rotation_speed * self.search_arc_amplitude * np.sin(2 * np.pi * self.search_time / self.search_cycle_time)
+        # Full revolution takes 2 * pi radians
+        # We'll do it in two phases: 180° left (π radians), then 180° right (π radians)
+        # Each phase takes search_cycle_time / 2 seconds
         
-        # Gradually increase amplitude over time (up to 2x after 10 seconds)
-        amplitude_multiplier = min(2.0, 1.0 + (search_elapsed - self.search_threshold) / 10.0)
-        search_rotation *= amplitude_multiplier
+        # Phase 1: Turn left for first half of cycle
+        if pattern_elapsed < (self.search_cycle_time / 2):
+            # First 180° left turn
+            phase_progress = pattern_elapsed / (self.search_cycle_time / 2)  # 0.0 to 1.0
+            target_rotation = math.pi * phase_progress  # 0 to π radians
+            
+            # Calculate current rotation speed to reach target
+            # Use constant rotation speed for smooth movement
+            search_rotation = self.search_rotation_speed
+            
+            # Ensure we're turning left (positive rotation)
+            search_rotation = abs(search_rotation)
+            
+        else:
+            # Phase 2: Turn right for second half of cycle
+            phase_progress = (pattern_elapsed - self.search_cycle_time / 2) / (self.search_cycle_time / 2)  # 0.0 to 1.0
+            target_rotation = math.pi * (1.0 - phase_progress)  # π to 0 radians
+            
+            # Calculate current rotation speed to reach target
+            # Use constant rotation speed for smooth movement
+            search_rotation = -self.search_rotation_speed  # Negative for right turn
+            
+            # Ensure we're turning right (negative rotation)
+            search_rotation = -abs(search_rotation)
         
         # Ensure rotation doesn't exceed maximum safe values
         search_rotation = np.clip(search_rotation, -self.search_arc_amplitude, self.search_arc_amplitude)
@@ -690,7 +711,7 @@ class HumanFollowerMediaPipe:
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
                     
                     # Show search pattern details
-                    pattern_info = f"Pattern: {self.search_rotation_speed:.1f} rad/s"
+                    pattern_info = f"360° Revolution: {self.search_cycle_time:.1f}s"
                     pattern_size = cv2.getTextSize(pattern_info, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
                     pattern_x = text_x
                     pattern_y = text_y + 60
@@ -701,6 +722,20 @@ class HumanFollowerMediaPipe:
                                  (0, 0, 0), -1)
                     
                     cv2.putText(frame, pattern_info, (pattern_x, pattern_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    
+                    # Show rotation speed
+                    speed_info = f"Speed: {self.search_rotation_speed:.1f} rad/s"
+                    speed_size = cv2.getTextSize(speed_info, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                    speed_x = text_x
+                    speed_y = text_y + 80
+                    
+                    cv2.rectangle(frame, 
+                                 (speed_x - 5, speed_y - speed_size[1] - 5),
+                                 (speed_x + speed_size[0] + 5, speed_y + 5),
+                                 (0, 0, 0), -1)
+                    
+                    cv2.putText(frame, speed_info, (speed_x, speed_y), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                 else:
                     # Show countdown to search start
@@ -736,36 +771,72 @@ class HumanFollowerMediaPipe:
         cv2.putText(frame, "SEARCHING FOR HUMANS", (search_x - 140, search_y + 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
-        # Draw search pattern visualization (left-right arrows)
+        # Draw search pattern visualization (360° revolution)
         arrow_y = search_y + 50
         
-        # Left arrow
-        cv2.arrowedLine(frame, (search_x - 100, arrow_y), (search_x - 50, arrow_y), (255, 0, 0), 3)
-        cv2.putText(frame, "LEFT", (search_x - 120, arrow_y + 20), 
+        # Draw circular revolution indicator
+        center_x, center_y = search_x, arrow_y
+        radius = 40
+        
+        # Draw circle representing full revolution
+        cv2.circle(frame, (center_x, center_y), radius, (0, 255, 255), 2)
+        
+        # Draw revolution arrows
+        # Left half (180° left turn)
+        cv2.arrowedLine(frame, (center_x, center_y - radius), (center_x - radius, center_y), (255, 0, 0), 3)
+        cv2.putText(frame, "180° LEFT", (center_x - 80, center_y - 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
         
-        # Right arrow
-        cv2.arrowedLine(frame, (search_x + 50, arrow_y), (search_x + 100, arrow_y), (0, 0, 255), 3)
-        cv2.putText(frame, "RIGHT", (search_x + 60, arrow_y + 20), 
+        # Right half (180° right turn)
+        cv2.arrowedLine(frame, (center_x + radius, center_y), (center_x, center_y - radius), (0, 0, 255), 3)
+        cv2.putText(frame, "180° RIGHT", (center_x + 20, center_y - 20), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
         
-        # Draw current search direction indicator
+        # Draw current search phase indicator
         if self.search_start_time and (time.time() - self.search_start_time) >= self.search_threshold:
             search_elapsed = time.time() - self.search_start_time
-            self.search_time = (search_elapsed - self.search_threshold) % self.search_cycle_time
+            pattern_elapsed = search_elapsed - self.search_threshold
             
-            # Calculate current search direction
-            search_rotation = self.search_rotation_speed * self.search_arc_amplitude * np.sin(2 * np.pi * self.search_time / self.search_cycle_time)
+            # Determine current phase
+            if pattern_elapsed < (self.search_cycle_time / 2):
+                # Phase 1: Turning left
+                current_phase = "PHASE 1: LEFT TURN"
+                current_color = (255, 0, 0)
+                phase_progress = pattern_elapsed / (self.search_cycle_time / 2)
+                degrees = int(180 * phase_progress)
+                progress_text = f"{degrees}° LEFT"
+            else:
+                # Phase 2: Turning right
+                current_phase = "PHASE 2: RIGHT TURN"
+                current_color = (0, 0, 255)
+                phase_progress = (pattern_elapsed - self.search_cycle_time / 2) / (self.search_cycle_time / 2)
+                degrees = int(180 * (1.0 - phase_progress))
+                progress_text = f"{degrees}° RIGHT"
             
-            # Draw current direction indicator
-            if abs(search_rotation) > 0.01:
-                current_direction = "LEFT" if search_rotation > 0 else "RIGHT"
-                current_color = (255, 0, 0) if search_rotation > 0 else (0, 0, 255)
-                
-                # Highlight current direction
-                cv2.circle(frame, (search_x, arrow_y), 15, current_color, -1)
-                cv2.putText(frame, current_direction, (search_x - 20, arrow_y + 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            # Draw current phase indicator
+            cv2.putText(frame, current_phase, (center_x - 60, center_y + 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, current_color, 1)
+            
+            # Draw progress indicator
+            cv2.putText(frame, progress_text, (center_x - 30, center_y + 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Draw progress arc on the circle
+            if pattern_elapsed < (self.search_cycle_time / 2):
+                # Left turn progress (0° to 180°)
+                start_angle = -90  # Start at top
+                end_angle = -90 + (180 * phase_progress)  # Progress clockwise
+            else:
+                # Right turn progress (180° to 0°)
+                start_angle = 90  # Start at bottom
+                end_angle = 90 - (180 * phase_progress)  # Progress counter-clockwise
+            
+            # Convert angles to OpenCV format (degrees, start from 0° at 3 o'clock)
+            cv2_start_angle = int((start_angle + 90) % 360)
+            cv2_end_angle = int((end_angle + 90) % 360)
+            
+            # Draw progress arc
+            cv2.ellipse(frame, (center_x, center_y), (radius, radius), 0, cv2_start_angle, cv2_end_angle, current_color, 3)
     
     def draw_movement_debug(self, frame, move_x, move_y, turn_z):
         """Draw movement debug information on the frame"""
@@ -914,7 +985,8 @@ class HumanFollowerMediaPipe:
                                 self.tracking_state = "searching"
                                 self.search_start_time = time.time()  # Initialize search timer
                                 print("Starting search mode - looking for skeleton...")
-                                print(f"Search parameters: Threshold={self.search_threshold}s, Rotation speed={self.search_rotation_speed}, Amplitude={self.search_arc_amplitude}, Cycle time={self.search_cycle_time}s")
+                                print(f"Search parameters: Threshold={self.search_threshold}s, Rotation speed={self.search_rotation_speed}, Full revolution cycle time={self.search_cycle_time}s")
+                                print(f"Pattern: 180° LEFT turn ({self.search_cycle_time/2:.1f}s), then 180° RIGHT turn ({self.search_cycle_time/2:.1f}s)")
                         
                         # Apply search pattern if in searching state
                         if self.tracking_state == "searching":
@@ -924,7 +996,15 @@ class HumanFollowerMediaPipe:
                             # Log search pattern movement
                             if abs(search_z) > 0.01:
                                 direction = "LEFT" if search_z > 0 else "RIGHT"
-                                print(f"Search pattern: Turning {direction} at speed {abs(search_z):.3f}")
+                                # Calculate current phase and progress
+                                pattern_elapsed = time.time() - self.search_start_time - self.search_threshold
+                                if pattern_elapsed < (self.search_cycle_time / 2):
+                                    phase = "Phase 1 (LEFT)"
+                                    degrees = int(180 * (pattern_elapsed / (self.search_cycle_time / 2)))
+                                else:
+                                    phase = "Phase 2 (RIGHT)"
+                                    degrees = int(180 * (1.0 - (pattern_elapsed - self.search_cycle_time / 2) / (self.search_cycle_time / 2)))
+                                print(f"Search pattern: {phase} - {degrees}° {direction} at speed {abs(search_z):.3f}")
                         
                         # Draw status message on frame
                         self.draw_tracking_status(frame)
