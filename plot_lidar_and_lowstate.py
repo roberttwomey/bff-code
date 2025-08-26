@@ -768,7 +768,7 @@ async def webrtc_lidar_and_lowstate():
                     foot_force = current_message['foot_force']
                     temperature_ntc1 = current_message['temperature_ntc1']
                     power_v = current_message['power_v']
-
+                    print(current_message)
                     motors = [
                         {
                             "q": round(motor['q'], 4),
