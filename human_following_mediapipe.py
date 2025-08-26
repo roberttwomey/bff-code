@@ -57,8 +57,8 @@ class HumanFollowerMediaPipe:
         self.center_tolerance = 20  # Increased tolerance for more responsive turning
         self.turn_speed = 0.8  # Reduced angular velocity for slower turning
         self.move_speed = 0.6  # Reduced forward movement speed for slower approach
-        self.min_pose_confidence = 0.9#0.5  # Minimum confidence for pose detection
-        
+        self.min_pose_confidence = 0.8#0.5  # Minimum confidence for pose detection
+        self.area_ratio_threshold = 0.30  # Threshold for area ratio to maintain greater distance
         # Control flags
         self.is_following = False
         self.last_human_detected = None
@@ -465,7 +465,7 @@ class HumanFollowerMediaPipe:
         # Use shoulder width and body height for better distance estimation
         area_ratio = best_human['area'] / (1280 * 720)  # Normalize by frame area
         
-        if area_ratio < 0.15:  # Reduced threshold to maintain greater distance
+        if area_ratio < self.area_ratio_threshold:  # Reduced threshold to maintain greater distance
             # Base forward speed
             base_speed = self.move_speed
             
