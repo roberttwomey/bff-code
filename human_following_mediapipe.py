@@ -10,6 +10,7 @@ from go2_webrtc_driver.constants import RTC_TOPIC, SPORT_CMD
 from aiortc import MediaStreamTrack
 import mediapipe as mp
 import json
+import math
 
 # Enable logging for debugging
 logging.basicConfig(level=logging.FATAL)
@@ -69,6 +70,14 @@ class HumanFollowerMediaPipe:
         self.skeleton_lost_time = None
         self.skeleton_lost_threshold = 0.5#1.0  # Seconds to wait before considering skeleton lost
         self.tracking_state = "searching"  # "tracking", "skeleton_lost", "searching"
+        
+        # Search pattern parameters
+        self.search_start_time = None
+        self.search_threshold = 1.0  # Seconds before starting search pattern
+        self.search_rotation_speed = 0.7  # Base rotation speed for search
+        self.search_arc_amplitude = 1.0 # Maximum rotation amplitude
+        self.search_cycle_time = 4.0  # Time for one complete left-right cycle
+        self.search_time = 0.0  # Current time in search cycle
         
         # Movement control parameters
         self.command_rate_hz = 10  # Commands per second (lower = slower, more stable)
@@ -211,6 +220,9 @@ class HumanFollowerMediaPipe:
                 print(f"Skeleton tracking restored - Visible: {best_human['visible_landmark_count']}/33, Confidence: {best_human['full_body_confidence']:.2f}")
             elif self.tracking_state == "searching":
                 print(f"Skeleton found - Visible: {best_human['visible_landmark_count']}/33, Confidence: {best_human['full_body_confidence']:.2f}")
+                # Reset search timer when human is found
+                self.search_start_time = None
+                self.search_time = 0.0
             
             self.tracking_state = "tracking"
             self.skeleton_lost_time = None
@@ -578,6 +590,35 @@ class HumanFollowerMediaPipe:
                 if (0 <= nose_x < frame_w and 0 <= nose_y < frame_h):
                     cv2.circle(frame, (nose_x, nose_y), 3, (0, 255, 255), -1)
     
+    def calculate_search_pattern(self):
+        """Calculate search pattern movement - slow left-right rotation with increasing amplitude"""
+        if self.search_start_time is None:
+            self.search_start_time = time.time()
+            self.search_time = 0.0
+        
+        # Calculate time since search started
+        search_elapsed = time.time() - self.search_start_time
+        
+        # Only start search pattern after threshold
+        if search_elapsed < self.search_threshold:
+            return 0.0, 0.0, 0.0  # No movement during initial wait
+        
+        # Calculate search cycle time
+        self.search_time = (search_elapsed - self.search_threshold) % self.search_cycle_time
+        
+        # Create sinusoidal search pattern (left to right rotation)
+        # Use sine wave to create smooth left-right-left pattern
+        search_rotation = self.search_rotation_speed * self.search_arc_amplitude * np.sin(2 * np.pi * self.search_time / self.search_cycle_time)
+        
+        # Gradually increase amplitude over time (up to 2x after 10 seconds)
+        amplitude_multiplier = min(2.0, 1.0 + (search_elapsed - self.search_threshold) / 10.0)
+        search_rotation *= amplitude_multiplier
+        
+        # Ensure rotation doesn't exceed maximum safe values
+        search_rotation = np.clip(search_rotation, -self.search_arc_amplitude, self.search_arc_amplitude)
+        
+        return 0.0, 0.0, float(search_rotation)  # No forward movement, only rotation
+    
     def draw_tracking_status(self, frame):
         """Draw current tracking status on the frame"""
         frame_h, frame_w = frame.shape[:2]
@@ -626,6 +667,105 @@ class HumanFollowerMediaPipe:
             # Draw info text
             cv2.putText(frame, info_text, (info_x, info_y), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        # Draw search pattern info if searching
+        elif self.tracking_state == "searching":
+            if self.search_start_time:
+                search_elapsed = time.time() - self.search_start_time
+                if search_elapsed >= self.search_threshold:
+                    # Show search pattern info
+                    search_info = f"Searching: {search_elapsed:.1f}s"
+                    search_size = cv2.getTextSize(search_info, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+                    search_x = text_x
+                    search_y = text_y + 40
+                    
+                    # Draw search info background
+                    cv2.rectangle(frame, 
+                                 (search_x - 5, search_y - search_size[1] - 5),
+                                 (search_x + search_size[0] + 5, search_y + 5),
+                                 (0, 0, 0), -1)
+                    
+                    # Draw search info text
+                    cv2.putText(frame, search_info, (search_x, search_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+                    
+                    # Show search pattern details
+                    pattern_info = f"Pattern: {self.search_rotation_speed:.1f} rad/s"
+                    pattern_size = cv2.getTextSize(pattern_info, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                    pattern_x = text_x
+                    pattern_y = text_y + 60
+                    
+                    cv2.rectangle(frame, 
+                                 (pattern_x - 5, pattern_y - pattern_size[1] - 5),
+                                 (pattern_x + pattern_size[0] + 5, pattern_y + 5),
+                                 (0, 0, 0), -1)
+                    
+                    cv2.putText(frame, pattern_info, (pattern_x, pattern_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                else:
+                    # Show countdown to search start
+                    countdown = self.search_threshold - search_elapsed
+                    countdown_text = f"Search in: {countdown:.1f}s"
+                    countdown_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+                    countdown_x = text_x
+                    countdown_y = text_y + 40
+                    
+                    cv2.rectangle(frame, 
+                                 (countdown_x - 5, countdown_y - countdown_size[1] - 5),
+                                 (countdown_x + countdown_size[0] + 5, countdown_y + 5),
+                                 (0, 0, 0), -1)
+                    
+                    cv2.putText(frame, countdown_text, (countdown_x, countdown_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+    
+    def draw_search_pattern(self, frame):
+        """Draw search pattern visualization on the frame"""
+        frame_h, frame_w = frame.shape[:2]
+        
+        # Draw search pattern indicator in top center
+        search_x = frame_w // 2
+        search_y = 100
+        
+        # Background for search indicator
+        cv2.rectangle(frame, 
+                     (search_x - 150, search_y - 30),
+                     (search_x + 150, search_y + 30),
+                     (0, 0, 0), -1)
+        
+        # Draw search pattern text
+        cv2.putText(frame, "SEARCHING FOR HUMANS", (search_x - 140, search_y + 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        # Draw search pattern visualization (left-right arrows)
+        arrow_y = search_y + 50
+        
+        # Left arrow
+        cv2.arrowedLine(frame, (search_x - 100, arrow_y), (search_x - 50, arrow_y), (255, 0, 0), 3)
+        cv2.putText(frame, "LEFT", (search_x - 120, arrow_y + 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+        
+        # Right arrow
+        cv2.arrowedLine(frame, (search_x + 50, arrow_y), (search_x + 100, arrow_y), (0, 0, 255), 3)
+        cv2.putText(frame, "RIGHT", (search_x + 60, arrow_y + 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        # Draw current search direction indicator
+        if self.search_start_time and (time.time() - self.search_start_time) >= self.search_threshold:
+            search_elapsed = time.time() - self.search_start_time
+            self.search_time = (search_elapsed - self.search_threshold) % self.search_cycle_time
+            
+            # Calculate current search direction
+            search_rotation = self.search_rotation_speed * self.search_arc_amplitude * np.sin(2 * np.pi * self.search_time / self.search_cycle_time)
+            
+            # Draw current direction indicator
+            if abs(search_rotation) > 0.01:
+                current_direction = "LEFT" if search_rotation > 0 else "RIGHT"
+                current_color = (255, 0, 0) if search_rotation > 0 else (0, 0, 255)
+                
+                # Highlight current direction
+                cv2.circle(frame, (search_x, arrow_y), 15, current_color, -1)
+                cv2.putText(frame, current_direction, (search_x - 20, arrow_y + 5), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     def draw_movement_debug(self, frame, move_x, move_y, turn_z):
         """Draw movement debug information on the frame"""
@@ -757,6 +897,10 @@ class HumanFollowerMediaPipe:
                         # Draw movement debug info on frame
                         self.draw_movement_debug(frame, move_x, move_y, turn_z)
                         
+                        # Draw search pattern visualization if searching
+                        if self.tracking_state == "searching":
+                            self.draw_search_pattern(frame)
+                        
                         self.last_human_detected = time.time()
                     else:
                         # Skeleton not visible or tracking quality too low
@@ -768,10 +912,26 @@ class HumanFollowerMediaPipe:
                             if (self.skeleton_lost_time and 
                                 time.time() - self.skeleton_lost_time > self.skeleton_lost_threshold):
                                 self.tracking_state = "searching"
+                                self.search_start_time = time.time()  # Initialize search timer
                                 print("Starting search mode - looking for skeleton...")
+                                print(f"Search parameters: Threshold={self.search_threshold}s, Rotation speed={self.search_rotation_speed}, Amplitude={self.search_arc_amplitude}, Cycle time={self.search_cycle_time}s")
+                        
+                        # Apply search pattern if in searching state
+                        if self.tracking_state == "searching":
+                            search_x, search_y, search_z = self.calculate_search_pattern()
+                            self.current_movement = {'x': float(search_x), 'y': float(search_y), 'z': float(search_z)}
+                            
+                            # Log search pattern movement
+                            if abs(search_z) > 0.01:
+                                direction = "LEFT" if search_z > 0 else "RIGHT"
+                                print(f"Search pattern: Turning {direction} at speed {abs(search_z):.3f}")
                         
                         # Draw status message on frame
                         self.draw_tracking_status(frame)
+                        
+                        # Draw search pattern visualization if searching
+                        if self.tracking_state == "searching":
+                            self.draw_search_pattern(frame)
                     
                     # Display the frame
                     cv2.imshow('Human Following (MediaPipe)', frame)
