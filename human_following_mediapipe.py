@@ -54,16 +54,21 @@ class HumanFollowerMediaPipe:
         
         # Visual servoing parameters
         self.target_center_x = 640  # Target center of frame (assuming 1280x720)
-        self.center_tolerance = 5  # Reduced tolerance for more precise centering
+        self.center_tolerance = 20  # Increased tolerance for more responsive turning
         self.turn_speed = 0.8  # Reduced angular velocity for slower turning
         self.move_speed = 0.6  # Reduced forward movement speed for slower approach
-        self.min_pose_confidence = 0.5  # Minimum confidence for pose detection
+        self.min_pose_confidence = 0.9#0.5  # Minimum confidence for pose detection
         
         # Control flags
         self.is_following = False
         self.last_human_detected = None
         self.current_movement = {'x': 0, 'y': 0, 'z': 0}
         self.movement_task = None
+        
+        # Skeleton tracking state
+        self.skeleton_lost_time = None
+        self.skeleton_lost_threshold = 0.5#1.0  # Seconds to wait before considering skeleton lost
+        self.tracking_state = "searching"  # "tracking", "skeleton_lost", "searching"
         
         # Movement control parameters
         self.command_rate_hz = 10  # Commands per second (lower = slower, more stable)
@@ -176,6 +181,41 @@ class HumanFollowerMediaPipe:
             print(f"Error switching to MCF motion mode: {e}")
             import traceback
             traceback.print_exc()
+    
+    def check_skeleton_visibility(self, humans):
+        """Check if skeleton is visible and update tracking state"""
+        if not humans:
+            # No humans detected
+            if self.tracking_state == "tracking":
+                self.tracking_state = "skeleton_lost"
+                self.skeleton_lost_time = time.time()
+                print("Skeleton lost - no humans detected")
+            return False
+        
+        # Check if we have good skeleton tracking
+        best_human = max(humans, key=lambda h: h['full_body_confidence'])
+        
+        # Check if skeleton meets minimum visibility requirements
+        if (best_human['visible_landmark_count'] < 20 or 
+            best_human['full_body_confidence'] < 0.6):
+            
+            if self.tracking_state == "tracking":
+                self.tracking_state = "skeleton_lost"
+                self.skeleton_lost_time = time.time()
+                print(f"Skeleton tracking quality too low - Visible: {best_human['visible_landmark_count']}/33, Confidence: {best_human['full_body_confidence']:.2f}")
+            return False
+        
+        # Good skeleton tracking
+        if self.tracking_state != "tracking":
+            if self.tracking_state == "skeleton_lost":
+                print(f"Skeleton tracking restored - Visible: {best_human['visible_landmark_count']}/33, Confidence: {best_human['full_body_confidence']:.2f}")
+            elif self.tracking_state == "searching":
+                print(f"Skeleton found - Visible: {best_human['visible_landmark_count']}/33, Confidence: {best_human['full_body_confidence']:.2f}")
+            
+            self.tracking_state = "tracking"
+            self.skeleton_lost_time = None
+        
+        return True
     
     async def move_robot(self, x=0, y=0, z=0):
         """Move the robot with specified velocities"""
@@ -329,14 +369,33 @@ class HumanFollowerMediaPipe:
                     self.mp_pose.PoseLandmark.RIGHT_HIP
                 ]
                 
-                key_confidence = sum(landmarks[i].visibility for i in key_landmarks) / len(key_landmarks)
+                # Additional landmarks for full body tracking
+                full_body_landmarks = [
+                    self.mp_pose.PoseLandmark.LEFT_EAR,
+                    self.mp_pose.PoseLandmark.RIGHT_EAR,
+                    self.mp_pose.PoseLandmark.LEFT_ANKLE,
+                    self.mp_pose.PoseLandmark.RIGHT_ANKLE,
+                    self.mp_pose.PoseLandmark.LEFT_WRIST,
+                    self.mp_pose.PoseLandmark.RIGHT_WRIST
+                ]
                 
-                if confidence > self.min_pose_confidence:
+                key_confidence = sum(landmarks[i].visibility for i in key_landmarks) / len(key_landmarks)
+                full_body_confidence = sum(landmarks[i].visibility for i in full_body_landmarks) / len(full_body_landmarks)
+                
+                # Require minimum number of visible landmarks and good full body visibility
+                min_visible_landmarks = 20  # At least 20 out of 33 landmarks should be visible
+                min_full_body_confidence = 0.6  # Full body landmarks should be reasonably visible
+                
+                if (confidence > self.min_pose_confidence and 
+                    visible_landmarks >= min_visible_landmarks and 
+                    full_body_confidence >= min_full_body_confidence):
                     humans.append({
                         'bbox': (x1, y1, x2, y2),
                         'center': (nose_x, nose_y),
                         'confidence': confidence,
                         'key_confidence': key_confidence,  # Confidence for key tracking points
+                        'full_body_confidence': full_body_confidence,  # Confidence for full body landmarks
+                        'visible_landmark_count': visible_landmarks,  # Number of visible landmarks
                         'area': bbox_width * bbox_height,
                         'landmarks': results.pose_landmarks,
                         'nose_pos': (nose_x, nose_y),
@@ -356,8 +415,15 @@ class HumanFollowerMediaPipe:
         if not humans:
             return 0, 0, 0  # No movement
         
-        # Find the human with highest key confidence (most stable tracking points)
-        best_human = max(humans, key=lambda h: h['key_confidence'])
+        # Find the human with highest full body confidence (most complete tracking)
+        best_human = max(humans, key=lambda h: h['full_body_confidence'])
+        
+        # Check if we have good enough tracking to proceed
+        if (best_human['visible_landmark_count'] < 20 or 
+            best_human['full_body_confidence'] < 0.6):
+            print(f"Poor tracking quality - Visible landmarks: {best_human['visible_landmark_count']}, Full body confidence: {best_human['full_body_confidence']:.2f}")
+            print("Waiting for better full body visibility...")
+            return 0, 0, 0  # Stop all movement until better tracking
         
         # Calculate skeleton center using multiple key points for more stable tracking
         landmarks = best_human['landmarks'].landmark
@@ -382,13 +448,18 @@ class HumanFollowerMediaPipe:
         turn_z = 0.0
         move_x = 0.0
         
+        # Debug turning calculation
+        print(f"Centering calculation - Skeleton center: {center_x}, Target: {self.target_center_x}, Offset: {offset_x}, Tolerance: {self.center_tolerance}")
+        
         # Turn towards human if not centered - more aggressive turning
         if abs(offset_x) > self.center_tolerance:
             # More aggressive turn speed calculation for faster response
             turn_z = -1.0 * np.clip(offset_x / self.target_center_x * self.turn_speed * 1.5, -self.turn_speed, self.turn_speed)
+            print(f"Turning to center - Offset: {offset_x:.1f}, Turn speed: {turn_z:.3f}")
         else:
             # Small corrections even when close to center
             turn_z = -0.3 * np.clip(offset_x / self.target_center_x, -0.5, 0.5)
+            print(f"Small centering correction - Offset: {offset_x:.1f}, Turn speed: {turn_z:.3f}")
         
         # Always move forward (positive x direction) when human is detected
         # Use shoulder width and body height for better distance estimation
@@ -428,13 +499,36 @@ class HumanFollowerMediaPipe:
                     landmark_drawing_spec=self.mp_drawing_styles.get_default_pose_landmarks_style()
                 )
                 
-                # Draw bounding box
+                # Draw bounding box (ensure it's within frame bounds)
                 x1, y1, x2, y2 = human['bbox']
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                frame_h, frame_w = frame.shape[:2]
                 
-                # Draw confidence and position info
-                cv2.putText(frame, f"Overall: {human['confidence']:.2f} | Key: {human['key_confidence']:.2f}", 
-                          (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                # Clamp bounding box coordinates to frame bounds
+                x1 = max(0, min(x1, frame_w - 1))
+                y1 = max(0, min(y1, frame_h - 1))
+                x2 = max(0, min(x2, frame_w - 1))
+                y2 = max(0, min(y2, frame_h - 1))
+                
+                # Only draw if bounding box is valid
+                if x2 > x1 and y2 > y1:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                
+                # Draw comprehensive confidence and tracking info
+                # Ensure text is within frame bounds and properly positioned
+                frame_h, frame_w = frame.shape[:2]
+                
+                # Calculate text positions that stay within bounds
+                text_y1 = max(y1 - 10, 20)  # At least 20 pixels from top
+                text_y2 = max(y1 - 30, 40)  # At least 40 pixels from top
+                
+                # Ensure text doesn't go off the left edge
+                text_x = max(x1, 5)
+                
+                # Draw confidence metrics with proper positioning
+                cv2.putText(frame, f"Overall: {human['confidence']:.2f} | Key: {human['key_confidence']:.2f} | Full: {human['full_body_confidence']:.2f}", 
+                          (text_x, text_y1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(frame, f"Visible: {human['visible_landmark_count']}/33", 
+                          (text_x, text_y2), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                 
                 # Draw skeleton center (tracking center)
                 landmarks = human['landmarks'].landmark
@@ -450,14 +544,120 @@ class HumanFollowerMediaPipe:
                 skeleton_center_x = int((nose.x + left_shoulder.x + right_shoulder.x + left_hip.x + right_hip.x) * w / 5)
                 skeleton_center_y = int((nose.y + left_shoulder.y + right_shoulder.y + left_hip.y + right_hip.y) * h / 5)
                 
-                # Draw skeleton center with larger circle
-                cv2.circle(frame, (skeleton_center_x, skeleton_center_y), 8, (255, 0, 0), -1)
-                cv2.putText(frame, "CENTER", (skeleton_center_x+10, skeleton_center_y), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+                # Draw skeleton center with larger circle (ensure within bounds)
+                if (0 <= skeleton_center_x < frame_w and 0 <= skeleton_center_y < frame_h):
+                    cv2.circle(frame, (skeleton_center_x, skeleton_center_y), 8, (255, 0, 0), -1)
+                    
+                    # Draw "CENTER" label within bounds
+                    label_x = min(skeleton_center_x + 10, frame_w - 60)  # Ensure label fits
+                    label_y = max(skeleton_center_y, 15)  # At least 15 pixels from top
+                    cv2.putText(frame, "CENTER", (label_x, label_y), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
                 
-                # Also draw nose for reference
+                # Draw target center line and tolerance zone
+                target_x = self.target_center_x
+                cv2.line(frame, (target_x, 0), (target_x, frame_h), (0, 255, 255), 2)  # Target center line
+                
+                # Draw tolerance zone
+                tol_left = target_x - self.center_tolerance
+                tol_right = target_x + self.center_tolerance
+                cv2.line(frame, (tol_left, 0), (tol_left, frame_h), (0, 255, 0), 1)  # Left tolerance
+                cv2.line(frame, (tol_right, 0), (tol_right, frame_h), (0, 255, 0), 1)  # Right tolerance
+                
+                # Draw offset indicator
+                offset = skeleton_center_x - target_x
+                if abs(offset) > self.center_tolerance:
+                    # Draw arrow showing which way to turn
+                    arrow_color = (0, 0, 255) if offset > 0 else (255, 0, 0)  # Red for right, Blue for left
+                    arrow_text = "TURN RIGHT" if offset > 0 else "TURN LEFT"
+                    cv2.putText(frame, arrow_text, (skeleton_center_x + 20, skeleton_center_y), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, arrow_color, 2)
+                
+                # Also draw nose for reference (ensure within bounds)
                 nose_x, nose_y = int(nose.x * w), int(nose.y * h)
-                cv2.circle(frame, (nose_x, nose_y), 3, (0, 255, 255), -1)
+                if (0 <= nose_x < frame_w and 0 <= nose_y < frame_h):
+                    cv2.circle(frame, (nose_x, nose_y), 3, (0, 255, 255), -1)
+    
+    def draw_tracking_status(self, frame):
+        """Draw current tracking status on the frame"""
+        frame_h, frame_w = frame.shape[:2]
+        
+        # Define status colors and messages
+        if self.tracking_state == "tracking":
+            color = (0, 255, 0)  # Green
+            status_text = "TRACKING"
+        elif self.tracking_state == "skeleton_lost":
+            color = (0, 0, 255)  # Red
+            status_text = "SKELETON LOST"
+        else:  # searching
+            color = (0, 255, 255)  # Yellow
+            status_text = "SEARCHING"
+        
+        # Draw status background
+        text_size = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+        text_x = 20
+        text_y = 50
+        
+        # Draw background rectangle
+        cv2.rectangle(frame, 
+                     (text_x - 10, text_y - text_size[1] - 10),
+                     (text_x + text_size[0] + 10, text_y + 10),
+                     (0, 0, 0), -1)
+        
+        # Draw status text
+        cv2.putText(frame, status_text, (text_x, text_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+        
+        # Draw additional info if skeleton is lost
+        if self.tracking_state == "skeleton_lost" and self.skeleton_lost_time:
+            elapsed_time = time.time() - self.skeleton_lost_time
+            info_text = f"Lost for: {elapsed_time:.1f}s"
+            
+            info_size = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            info_x = text_x
+            info_y = text_y + 40
+            
+            # Draw info background
+            cv2.rectangle(frame, 
+                         (info_x - 5, info_y - info_size[1] - 5),
+                         (info_x + info_size[0] + 5, info_y + 5),
+                         (0, 0, 0), -1)
+            
+            # Draw info text
+            cv2.putText(frame, info_text, (info_x, info_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    
+    def draw_movement_debug(self, frame, move_x, move_y, turn_z):
+        """Draw movement debug information on the frame"""
+        frame_h, frame_w = frame.shape[:2]
+        
+        # Draw movement values in bottom right corner
+        debug_x = frame_w - 300
+        debug_y = frame_h - 50
+        
+        # Background for debug info
+        cv2.rectangle(frame, 
+                     (debug_x - 10, debug_y - 80),
+                     (debug_x + 280, debug_y + 10),
+                     (0, 0, 0), -1)
+        
+        # Draw movement values
+        cv2.putText(frame, f"Move X: {move_x:.3f}", (debug_x, debug_y - 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(frame, f"Move Y: {move_y:.3f}", (debug_x, debug_y - 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(frame, f"Turn Z: {turn_z:.3f}", (debug_x, debug_y - 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Draw turning direction indicator
+        if abs(turn_z) > 0.01:
+            turn_direction = "LEFT" if turn_z > 0 else "RIGHT"
+            turn_color = (255, 0, 0) if turn_z > 0 else (0, 0, 255)
+            cv2.putText(frame, f"TURNING {turn_direction}", (debug_x, debug_y + 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, turn_color, 2)
+        else:
+            cv2.putText(frame, "CENTERED", (debug_x, debug_y + 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     async def recv_camera_stream(self, track: MediaStreamTrack):
         """Receive video frames and process them"""
@@ -515,8 +715,11 @@ class HumanFollowerMediaPipe:
                     # Detect humans using MediaPipe
                     humans = self.detect_humans_mediapipe(frame)
                     
-                    if humans:
-                        # Calculate control signals
+                    # Check skeleton visibility and update tracking state
+                    skeleton_visible = self.check_skeleton_visibility(humans)
+                    
+                    if skeleton_visible:
+                        # Calculate control signals only when skeleton is visible
                         move_x, move_y, turn_z = self.calculate_control_signals(humans)
                         
                         # Update current movement for continuous task (ensure Python native types)
@@ -533,21 +736,42 @@ class HumanFollowerMediaPipe:
                             if abs(turn_z) > 0.01:
                                 direction = "LEFT" if turn_z > 0 else "RIGHT"
                                 print(f"  -> Turning {direction} at speed {abs(turn_z):.2f}")
+                        else:
+                            print("No movement - skeleton centered or too close")
                         
-                        # Log confidence information for debugging
+                        # Debug: Show current movement values
+                        print(f"Current movement state: {self.current_movement}")
+                        
+                        # Log comprehensive tracking information for debugging
                         if humans:
-                            best_human = max(humans, key=lambda h: h['key_confidence'])
-                            print(f"Tracking confidence - Overall: {best_human['confidence']:.3f}, Key points: {best_human['key_confidence']:.3f}")
+                            best_human = max(humans, key=lambda h: h['full_body_confidence'])
+                            print(f"Tracking quality - Overall: {best_human['confidence']:.3f}, Key: {best_human['key_confidence']:.3f}, Full body: {best_human['full_body_confidence']:.2f}")
+                            print(f"Visible landmarks: {best_human['visible_landmark_count']}/33")
                         
                         # Draw pose landmarks and detection info
                         self.draw_pose_landmarks(frame, humans)
                         
+                        # Draw tracking status
+                        self.draw_tracking_status(frame)
+                        
+                        # Draw movement debug info on frame
+                        self.draw_movement_debug(frame, move_x, move_y, turn_z)
+                        
                         self.last_human_detected = time.time()
                     else:
-                        # No humans detected, stop moving
-                        if self.last_human_detected and time.time() - self.last_human_detected > 2:
+                        # Skeleton not visible or tracking quality too low
+                        if self.tracking_state == "skeleton_lost":
+                            # Stop all movement when skeleton is lost
                             self.current_movement = {'x': 0, 'y': 0, 'z': 0}
-                            print("No humans detected, stopped moving")
+                            
+                            # Check if we should start searching (after threshold time)
+                            if (self.skeleton_lost_time and 
+                                time.time() - self.skeleton_lost_time > self.skeleton_lost_threshold):
+                                self.tracking_state = "searching"
+                                print("Starting search mode - looking for skeleton...")
+                        
+                        # Draw status message on frame
+                        self.draw_tracking_status(frame)
                     
                     # Display the frame
                     cv2.imshow('Human Following (MediaPipe)', frame)
