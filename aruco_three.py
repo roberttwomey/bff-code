@@ -40,8 +40,8 @@ class SimpleArUcoController:
         
         # Control gains
         self.k_approach = 5.0       # Approach control gain (increased for 10Hz)
-        self.k_yaw = 1.0            # Yaw control gain (increased for 10Hz)
-        self.k_strafe = 0.001        # Strafe control gain for perpendicular alignment (increased for 10Hz)
+        self.k_yaw = 0.5            # Yaw control gain (increased for 10Hz)
+        self.k_strafe = 1.0        # Strafe control gain for perpendicular alignment (increased for 10Hz)
         
         # Velocity limits
         self.max_linear_vel = 1.5   # m/s
@@ -368,13 +368,14 @@ class SimpleArUcoController:
                                 ideal_position_error = position_error[1]  # Y component for strafe
                                 
                                 # Use ideal position error for strafe, horizontal angle for yaw
-                                vy = self.clamp(self.k_strafe * ideal_position_error * 10, 
+                                vy = self.clamp(self.k_strafe * ideal_position_error * 0.5, 
                                               -self.max_linear_vel, self.max_linear_vel)
                                 
-                                # Yaw to rotate toward perpendicular orientation
-                                wz = self.clamp(-self.k_yaw * horizontal_angle * 0.5, 
-                                              -self.max_angular_vel, self.max_angular_vel)
-                                
+                                # # Yaw to rotate toward perpendicular orientation
+                                # wz = self.clamp(-self.k_yaw * horizontal_angle * 0.5, 
+                                #               -self.max_angular_vel, self.max_angular_vel)
+                                wz = 0
+
                                 print(f"Phase 3a - Perpendicular alignment: angle={np.rad2deg(horizontal_angle):.1f}°, ideal_error={ideal_position_error:.3f}m, vy={vy:.3f}, wz={wz:.3f}")
                                 
                                 # Draw phase status on frame
