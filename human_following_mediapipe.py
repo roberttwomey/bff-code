@@ -57,8 +57,11 @@ class HumanFollowerMediaPipe:
         self.center_tolerance = 20  # Increased tolerance for more responsive turning
         self.turn_speed = 0.8  # Reduced angular velocity for slower turning
         self.move_speed = 0.6  # Reduced forward movement speed for slower approach
-        self.min_pose_confidence = 0.8#0.5  # Minimum confidence for pose detection
+        # self.min_pose_confidence = 0.8#0.5  # Minimum confidence for pose detection
+        self.min_pose_confidence = 0.6 # Minimum confidence for pose detection
+        self.min_landmarks_tracked = 20 # Minimum number of landmarks tracked to consider the skeleton visible
         self.area_ratio_threshold = 0.30  # Threshold for area ratio to maintain greater distance
+        
         # Control flags
         self.is_following = False
         self.last_human_detected = None
@@ -196,8 +199,8 @@ class HumanFollowerMediaPipe:
         best_human = max(humans, key=lambda h: h['full_body_confidence'])
         
         # Check if skeleton meets minimum visibility requirements
-        if (best_human['visible_landmark_count'] < 20 or 
-            best_human['full_body_confidence'] < 0.6):
+        if (best_human['visible_landmark_count'] < self.min_landmarks_tracked or 
+            best_human['full_body_confidence'] < self.min_pose_confidence):
             
             if self.tracking_state == "tracking":
                 self.tracking_state = "skeleton_lost"
@@ -383,8 +386,8 @@ class HumanFollowerMediaPipe:
                 full_body_confidence = sum(landmarks[i].visibility for i in full_body_landmarks) / len(full_body_landmarks)
                 
                 # Require minimum number of visible landmarks and good full body visibility
-                min_visible_landmarks = 20  # At least 20 out of 33 landmarks should be visible
-                min_full_body_confidence = 0.6  # Full body landmarks should be reasonably visible
+                min_visible_landmarks = self.min_landmarks_tracked  # At least 20 out of 33 landmarks should be visible
+                min_full_body_confidence = self.min_pose_confidence  # Full body landmarks should be reasonably visible
                 
                 if (confidence > self.min_pose_confidence and 
                     visible_landmarks >= min_visible_landmarks and 
@@ -419,8 +422,8 @@ class HumanFollowerMediaPipe:
         best_human = max(humans, key=lambda h: h['full_body_confidence'])
         
         # Check if we have good enough tracking to proceed
-        if (best_human['visible_landmark_count'] < 20 or 
-            best_human['full_body_confidence'] < 0.6):
+        if (best_human['visible_landmark_count'] < self.min_landmarks_tracked or 
+            best_human['full_body_confidence'] < self.min_pose_confidence):
             print(f"Poor tracking quality - Visible landmarks: {best_human['visible_landmark_count']}, Full body confidence: {best_human['full_body_confidence']:.2f}")
             print("Waiting for better full body visibility...")
             return 0, 0, 0  # Stop all movement until better tracking
@@ -726,16 +729,16 @@ class HumanFollowerMediaPipe:
                         self.current_movement = {'x': float(move_x), 'y': float(move_y), 'z': float(turn_z)}
                         
                         # Debug: Print types to ensure they're Python native
-                        print(f"Movement types - x: {type(move_x)}, y: {type(move_y)}, z: {type(turn_z)}")
+                        # print(f"Movement types - x: {type(move_x)}, y: {type(move_y)}, z: {type(turn_z)}")
                         
                         # Log movement commands
                         if abs(move_x) > 0.01 or abs(turn_z) > 0.01:
                             print(f"Movement command: x={move_x:.2f} (forward), y={move_y:.2f}, z={turn_z:.2f}")
-                            if move_x > 0:
-                                print(f"  -> Moving FORWARD (positive x) at speed {move_x:.2f}")
-                            if abs(turn_z) > 0.01:
-                                direction = "LEFT" if turn_z > 0 else "RIGHT"
-                                print(f"  -> Turning {direction} at speed {abs(turn_z):.2f}")
+                            # if move_x > 0:
+                            #     print(f"  -> Moving FORWARD (positive x) at speed {move_x:.2f}")
+                            # if abs(turn_z) > 0.01:
+                            #     direction = "LEFT" if turn_z > 0 else "RIGHT"
+                            #     print(f"  -> Turning {direction} at speed {abs(turn_z):.2f}")
                         else:
                             print("No movement - skeleton centered or too close")
                         
@@ -743,10 +746,10 @@ class HumanFollowerMediaPipe:
                         print(f"Current movement state: {self.current_movement}")
                         
                         # Log comprehensive tracking information for debugging
-                        if humans:
-                            best_human = max(humans, key=lambda h: h['full_body_confidence'])
-                            print(f"Tracking quality - Overall: {best_human['confidence']:.3f}, Key: {best_human['key_confidence']:.3f}, Full body: {best_human['full_body_confidence']:.2f}")
-                            print(f"Visible landmarks: {best_human['visible_landmark_count']}/33")
+                        # if humans:
+                        #     best_human = max(humans, key=lambda h: h['full_body_confidence'])
+                        #     print(f"Tracking quality - Overall: {best_human['confidence']:.3f}, Key: {best_human['key_confidence']:.3f}, Full body: {best_human['full_body_confidence']:.2f}")
+                        #     print(f"Visible landmarks: {best_human['visible_landmark_count']}/33")
                         
                         # Draw pose landmarks and detection info
                         self.draw_pose_landmarks(frame, humans)
