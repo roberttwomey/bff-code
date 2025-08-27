@@ -43,15 +43,26 @@ class ArucoVisualServoing:
         
         # Visual servoing parameters
         self.target_center_x = 640  # Target center of frame (assuming 1280x720)
-        self.center_tolerance = 30  # Tolerance for centering
+        self.center_tolerance = 50  # Increased tolerance for centering to reduce oscillation
         self.target_distance = 1.0  # Target distance in meters
         self.distance_tolerance = 0.1  # Distance tolerance in meters
         self.tag_size = 0.2  # Physical size of Aruco tag in meters (adjust as needed)
         
         # Control parameters
-        self.turn_speed = 0.8  # Angular velocity for turning
+        self.turn_speed = 0.5  # Angular velocity for turning
         self.move_speed = 0.6  # Forward/backward movement speed
+        self.sideways_speed = 0.4  # Sideways movement speed
         self.search_speed = 1.0  # Speed for searching rotation
+        
+        # Proportional control gains
+        self.centering_gain = 0.0005  # Reduced gain for lateral movement (was 0.001)
+        self.perpendicularity_gain = 0.3  # Reduced gain for forward/backward movement (was 0.5)
+        self.rotation_gain = 0.2  # Reduced gain for rotation (was 0.3)
+        self.distance_gain = 0.2  # Reduced gain for distance control (was 0.3)
+        
+        # Dead zone parameters
+        self.min_movement_threshold = 0.01  # Reduced minimum movement threshold (was 0.03)
+        self.dead_zone_multiplier = 0.6  # Reduced dead zone multiplier (was 0.8)
         
         # Control flags
         self.is_running = False
@@ -59,9 +70,9 @@ class ArucoVisualServoing:
         self.movement_task = None
         
         # State tracking
-        self.state = "searching"  # "searching", "centering", "approaching", "positioned"
+        self.state = "searching"  # "searching", "centering", "orienting", "approaching", "positioned"
         self.last_tag_detected = None
-        self.command_rate_hz = 10  # Commands per second (slower for debugging)
+        self.command_rate_hz = 5  # Commands per second (slower for debugging)
         
     async def connect(self):
         """Connect to the Go2 robot"""
@@ -160,9 +171,51 @@ class ArucoVisualServoing:
         await self.move_robot(0, 0, -1.0)
         await asyncio.sleep(2)
         
+        # Test forward/backward
+        print("Testing forward movement...")
+        await self.move_robot(1.0, 0, 0)
+        await asyncio.sleep(2)
+        
+        print("Testing backward movement...")
+        await self.move_robot(-1.0, 0, 0)
+        await asyncio.sleep(2)
+        
+        # Test sideways movement
+        print("Testing left movement...")
+        await self.move_robot(0, 1.0, 0)
+        await asyncio.sleep(2)
+        
+        print("Testing right movement...")
+        await self.move_robot(0, -1.0, 0)
+        await asyncio.sleep(2)
+        
         # Stop
         await self.stop_robot()
         print("Movement test completed")
+    
+    async def direct_move(self, direction, duration=1.0):
+        """Execute a direct movement command"""
+        print(f"Executing direct move: {direction}")
+        
+        if direction == "forward":
+            await self.move_robot(self.move_speed, 0, 0)
+        elif direction == "backward":
+            await self.move_robot(-self.move_speed, 0, 0)
+        elif direction == "left":
+            await self.move_robot(0, self.sideways_speed, 0)
+        elif direction == "right":
+            await self.move_robot(0, -self.sideways_speed, 0)
+        elif direction == "rotate_left":
+            await self.move_robot(0, 0, self.turn_speed)
+        elif direction == "rotate_right":
+            await self.move_robot(0, 0, -self.turn_speed)
+        else:
+            print(f"Unknown direction: {direction}")
+            return
+        
+        await asyncio.sleep(duration)
+        await self.stop_robot()
+        print(f"Direct move {direction} completed")
     
     async def continuous_movement_task(self):
         """Task that continuously sends movement commands"""
@@ -170,6 +223,10 @@ class ArucoVisualServoing:
             try:
                 # Debug: Print current movement values
                 print(f"Movement task - Current: x={self.current_movement['x']:.3f}, y={self.current_movement['y']:.3f}, z={self.current_movement['z']:.3f}")
+                
+                # Determine movement type for clearer logging
+                movement_type = self.get_movement_type()
+                print(f"Movement type: {movement_type}")
                 
                 if (abs(self.current_movement['x']) > 0.01 or 
                     abs(self.current_movement['y']) > 0.01 or 
@@ -189,6 +246,32 @@ class ArucoVisualServoing:
             except Exception as e:
                 print(f"Error in continuous movement task: {e}")
                 await asyncio.sleep(0.1)
+    
+    def get_movement_type(self):
+        """Get a human-readable description of the current movement with priority order"""
+        x, y, z = self.current_movement['x'], self.current_movement['y'], self.current_movement['z']
+        
+        # Priority order: Lateral (left/right) -> Forward/Backward -> Rotation
+        movements = []
+        
+        # Check lateral movement first (highest priority)
+        if abs(y) > 0.01:
+            movements.append("LEFT" if y > 0 else "RIGHT")
+        
+        # Check forward/backward movement second
+        if abs(x) > 0.01:
+            movements.append("FORWARD" if x > 0 else "BACKWARD")
+        
+        # Check rotation last (lowest priority)
+        if abs(z) > 0.01:
+            movements.append("ROTATE LEFT" if z > 0 else "ROTATE RIGHT")
+        
+        if len(movements) == 0:
+            return "STOPPED"
+        elif len(movements) == 1:
+            return movements[0]
+        else:
+            return " + ".join(movements)
     
     def detect_aruco_tags(self, frame):
         """Detect Aruco tags in the frame"""
@@ -233,7 +316,7 @@ class ArucoVisualServoing:
             return []
     
     def calculate_control_signals(self, tags):
-        """Calculate control signals based on detected Aruco tags"""
+        """Calculate control signals based on detected Aruco tags using combined proportional control"""
         if not tags:
             # No tags detected - search by rotating
             print("No Aruco tags detected - searching...")
@@ -243,50 +326,290 @@ class ArucoVisualServoing:
         tag = tags[0]
         center_x, center_y = tag['center']
         estimated_distance = tag['estimated_distance']
+        corners = tag['corners']
         
         print(f"Tag detected - ID: {tag['id']}, Center: ({center_x}, {center_y}), Distance: {estimated_distance:.2f}m")
         
         # Calculate horizontal offset for centering
         offset_x = center_x - self.target_center_x
         
-        # Determine state and control signals
+        # Calculate perpendicularity using perspective distortion
+        perpendicularity_score, orientation_info = self.calculate_perpendicularity(corners)
+        
+        print(f"Perpendicularity score: {perpendicularity_score:.3f}, Orientation: {orientation_info}")
+        print(f"Centering offset: {offset_x:.1f} pixels, Tolerance: {self.center_tolerance}")
+        print(f"Distance: {estimated_distance:.2f}m, Target: {self.target_distance}m, Tolerance: {self.distance_tolerance}")
+        
+        # Initialize movement commands
+        move_x = 0
+        move_y = 0
+        turn_z = 0
+        
+        # Calculate distance error
+        distance_error = estimated_distance - self.target_distance
+        
+        # COMBINED CONTROL STRATEGY:
+        # Always calculate all corrections and apply them simultaneously
+        
+        # 1. Centering correction (lateral movement) - ALWAYS active
+        centering_gain = self.centering_gain
+        move_y = -centering_gain * offset_x  # Negative because positive offset means move right
+        move_y = np.clip(move_y, -self.sideways_speed, self.sideways_speed)
+        
         if abs(offset_x) > self.center_tolerance:
-            # Need to center the tag horizontally
-            self.state = "centering"
+            print(f"Centering - Lateral movement: {move_y:.3f} (offset: {offset_x:.1f})")
+        else:
+            print(f"Centering - Minimal lateral movement: {move_y:.3f} (offset: {offset_x:.1f})")
+        
+        # 2. Perpendicularity correction - ALWAYS active
+        if perpendicularity_score < 0.9:
+            perp_gain = self.perpendicularity_gain
             
-            # Simplified turning logic - more direct approach
-            if offset_x > 0:
-                # Tag is to the right, turn right (negative z)
-                turn_z = -self.turn_speed
-            else:
-                # Tag is to the left, turn left (positive z)
-                turn_z = self.turn_speed
+            if orientation_info == "tilted_up":
+                # Move backward to become perpendicular
+                perp_move = -perp_gain * (0.9 - perpendicularity_score)
+                perp_move = np.clip(perp_move, -self.move_speed, 0)
+                move_x += perp_move
+                print(f"Orienting - Moving backward: {perp_move:.3f} (perp score: {perpendicularity_score:.3f})")
                 
-            move_x = 0  # Don't move forward/backward while centering
-            print(f"Centering tag - Offset: {offset_x:.1f}, Turn speed: {turn_z:.3f}")
-            print(f"Tag at {center_x}, target at {self.target_center_x}, turning {'right' if turn_z < 0 else 'left'}")
+            elif orientation_info == "tilted_down":
+                # Move forward to become perpendicular
+                perp_move = perp_gain * (0.9 - perpendicularity_score)
+                perp_move = np.clip(perp_move, 0, self.move_speed)
+                move_x += perp_move
+                print(f"Orienting - Moving forward: {perp_move:.3f} (perp score: {perpendicularity_score:.3f})")
+                
+            elif orientation_info in ["tilted_left", "tilted_right"]:
+                # Use rotation for left/right tilt
+                turn_gain = self.rotation_gain
+                if orientation_info == "tilted_left":
+                    perp_turn = turn_gain * (0.9 - perpendicularity_score)
+                    perp_turn = np.clip(perp_turn, 0, self.turn_speed)
+                    turn_z += perp_turn
+                else:
+                    perp_turn = -turn_gain * (0.9 - perpendicularity_score)
+                    perp_turn = np.clip(perp_turn, -self.turn_speed, 0)
+                    turn_z += perp_turn
+                print(f"Orienting - Turning: {perp_turn:.3f} (perp score: {perpendicularity_score:.3f})")
+            else:
+                print(f"Orienting - No correction needed (perp score: {perpendicularity_score:.3f})")
+        else:
+            print("Tag is perpendicular - no orientation correction needed")
+        
+        # 3. Distance correction (forward/backward movement) - ALWAYS active
+        if abs(distance_error) > self.distance_tolerance:
+            distance_gain = self.distance_gain
             
-        elif abs(estimated_distance - self.target_distance) > self.distance_tolerance:
-            # Tag is centered, need to adjust distance
-            self.state = "approaching"
-            if estimated_distance > self.target_distance:
+            if distance_error > 0:
                 # Too far - move forward
-                move_x = self.move_speed
-                print(f"Moving forward - Distance: {estimated_distance:.2f}m, Target: {self.target_distance}m")
+                distance_move = distance_gain * distance_error
+                distance_move = np.clip(distance_move, 0, self.move_speed)
+                move_x += distance_move
+                print(f"Approaching - Moving forward: {distance_move:.3f} (distance error: {distance_error:.2f}m)")
             else:
                 # Too close - move backward
-                move_x = -self.move_speed
-                print(f"Moving backward - Distance: {estimated_distance:.2f}m, Target: {self.target_distance}m")
-            turn_z = 0  # Keep current orientation
-            
+                distance_move = distance_gain * distance_error
+                distance_move = np.clip(distance_move, -self.move_speed, 0)
+                move_x += distance_move
+                print(f"Approaching - Moving backward: {distance_move:.3f} (distance error: {distance_error:.2f}m)")
         else:
-            # Tag is centered and at correct distance
-            self.state = "positioned"
-            move_x = 0
-            turn_z = 0
-            print(f"Positioned correctly - Distance: {estimated_distance:.2f}m")
+            print("Distance is correct - no distance correction needed")
         
-        return float(move_x), 0.0, float(turn_z)
+        # 4. Combined movement strategy for maintaining centering during perpendicularity correction
+        # When tag is roughly centered but needs perpendicularity correction, use rotation to help maintain centering
+        if (abs(offset_x) < self.center_tolerance * 2 and  # Roughly centered
+            perpendicularity_score < 0.9 and  # Needs perpendicularity correction
+            orientation_info in ["tilted_left", "tilted_right"]):  # Left/right tilt
+            
+            # Add a small rotation component to help maintain centering
+            centering_rotation_gain = 0.1  # Small gain for centering rotation
+            centering_turn = centering_rotation_gain * offset_x  # Use offset to determine rotation direction
+            centering_turn = np.clip(centering_turn, -self.turn_speed * 0.3, self.turn_speed * 0.3)  # Limit to 30% of max turn speed
+            turn_z += centering_turn
+            print(f"Combined control - Adding centering rotation: {centering_turn:.3f} (offset: {offset_x:.1f})")
+        
+        # 5. Special handling for when tag is centered but needs perpendicularity correction
+        # This prevents the robot from overshooting by using more conservative movements
+        if (abs(offset_x) <= self.center_tolerance and  # Tag is centered
+            perpendicularity_score < 0.9):  # But needs perpendicularity correction
+            
+            # Use a less aggressive safety factor to preserve necessary movements
+            centering_safety_factor = 0.8  # Only reduce speed by 20% when centered but not perpendicular
+            move_x *= centering_safety_factor
+            move_y *= centering_safety_factor
+            turn_z *= centering_safety_factor
+            print(f"Centered but not perpendicular - Reducing speeds by {((1-centering_safety_factor)*100):.0f}%")
+            
+            # For left/right tilts when centered, use more rotation and less lateral movement
+            if orientation_info in ["tilted_left", "tilted_right"]:
+                # Increase rotation component and reduce lateral movement
+                rotation_boost = 1.5  # Boost rotation by 50%
+                lateral_reduction = 0.3  # Reduce lateral movement by 70%
+                turn_z *= rotation_boost
+                move_y *= lateral_reduction
+                print(f"Centered with left/right tilt - Boosting rotation, reducing lateral movement")
+        
+        # 6. Check if all conditions are met (positioned correctly)
+        if (abs(offset_x) <= self.center_tolerance and 
+            perpendicularity_score >= 0.9 and 
+            abs(distance_error) <= self.distance_tolerance):
+            
+            self.state = "positioned"
+            # Stop all movement
+            move_x = 0
+            move_y = 0
+            turn_z = 0
+            print(f"POSITIONED - All conditions met! Stopping movement.")
+        else:
+            # Determine current state for display
+            if abs(offset_x) > self.center_tolerance:
+                self.state = "centering"
+            elif perpendicularity_score < 0.9:
+                self.state = "orienting"
+            elif abs(distance_error) > self.distance_tolerance:
+                self.state = "approaching"
+            else:
+                self.state = "fine_tuning"
+        
+        # Apply dead zone multiplier
+        if abs(offset_x) < self.center_tolerance * self.dead_zone_multiplier:
+            move_y = 0
+        if abs(distance_error) < self.distance_tolerance * self.dead_zone_multiplier:
+            move_x = 0
+        
+        # Apply safety speed reduction when close to target
+        safety_factor = 1.0
+        if (abs(offset_x) < self.center_tolerance * 1.5 and 
+            abs(distance_error) < self.distance_tolerance * 1.5 and
+            perpendicularity_score > 0.8):
+            safety_factor = 0.2  # Reduce speed by 80% when close to target (was 0.3)
+            print(f"Safety mode: Reducing movement speed by {((1-safety_factor)*100):.0f}%")
+        elif (abs(offset_x) < self.center_tolerance * 2.5 and 
+              abs(distance_error) < self.distance_tolerance * 2.5 and
+              perpendicularity_score > 0.7):
+            safety_factor = 0.5  # Reduce speed by 50% when moderately close to target
+            print(f"Moderate safety mode: Reducing movement speed by {((1-safety_factor)*100):.0f}%")
+        
+        move_x *= safety_factor
+        move_y *= safety_factor
+        turn_z *= safety_factor
+        
+        # Apply minimum movement threshold to prevent jitter
+        min_threshold = self.min_movement_threshold
+        if abs(move_x) < min_threshold:
+            move_x = 0
+        if abs(move_y) < min_threshold:
+            move_y = 0
+        if abs(turn_z) < min_threshold:
+            turn_z = 0
+        
+        # Special case: If very close to target distance, allow small movements
+        if abs(distance_error) < self.distance_tolerance * 1.5 and abs(distance_error) > self.distance_tolerance * 0.5:
+            # Allow smaller movements when close to target
+            close_threshold = 0.005  # Very small threshold for close movements
+            if abs(move_x) < close_threshold and abs(distance_error) > self.distance_tolerance:
+                # Restore small distance correction
+                small_correction = 0.01 if distance_error > 0 else -0.01
+                move_x = small_correction
+                print(f"Close to target - Allowing small distance correction: {move_x:.3f}")
+        
+        # Debug output
+        print(f"Final movement commands - x: {move_x:.3f}, y: {move_y:.3f}, z: {turn_z:.3f}")
+        print(f"State: {self.state}")
+        
+        # Additional debug info
+        print(f"Distance error: {distance_error:.3f}m, Target: {self.target_distance}m")
+        print(f"Perpendicularity score: {perpendicularity_score:.3f}, Threshold: 0.9")
+        print(f"Centering offset: {offset_x:.1f}px, Tolerance: {self.center_tolerance}")
+        
+        return float(move_x), float(move_y), float(turn_z)
+    
+    def calculate_perpendicularity(self, corners):
+        """
+        Calculate how perpendicular the robot is to the Aruco tag surface.
+        Returns a score (0-1) and orientation information.
+        """
+        try:
+            # corners should be a 4x2 array of corner coordinates
+            if corners.shape != (4, 2):
+                print(f"Invalid corners shape: {corners.shape}")
+                return 0.5, "unknown"
+            
+            # Calculate the sides of the tag
+            # Assuming corners are in order: top-left, top-right, bottom-right, bottom-left
+            top_left = corners[0]
+            top_right = corners[1]
+            bottom_right = corners[2]
+            bottom_left = corners[3]
+            
+            # Calculate side lengths
+            top_side = np.linalg.norm(top_right - top_left)
+            bottom_side = np.linalg.norm(bottom_right - bottom_left)
+            left_side = np.linalg.norm(bottom_left - top_left)
+            right_side = np.linalg.norm(bottom_right - top_right)
+            
+            # Calculate aspect ratio (should be close to 1.0 for a square tag when perpendicular)
+            horizontal_ratio = top_side / bottom_side
+            vertical_ratio = left_side / right_side
+            
+            # Calculate center lines to detect tilt
+            top_center = (top_left + top_right) / 2
+            bottom_center = (bottom_left + bottom_right) / 2
+            left_center = (top_left + bottom_left) / 2
+            right_center = (top_right + bottom_right) / 2
+            
+            # Calculate tilt angles
+            horizontal_tilt = np.arctan2(bottom_center[1] - top_center[1], bottom_center[0] - top_center[0])
+            vertical_tilt = np.arctan2(right_center[0] - left_center[0], right_center[1] - left_center[1])
+            
+            # Convert to degrees
+            horizontal_tilt_deg = np.degrees(horizontal_tilt)
+            vertical_tilt_deg = np.degrees(vertical_tilt)
+            
+            # Calculate perpendicularity score
+            # Perfect perpendicularity would have:
+            # - horizontal_ratio = 1.0 (no perspective distortion)
+            # - vertical_ratio = 1.0 (no perspective distortion)
+            # - horizontal_tilt = 0° (no rotation)
+            # - vertical_tilt = 0° (no tilt)
+            
+            ratio_score = min(horizontal_ratio, vertical_ratio) / max(horizontal_ratio, vertical_ratio)
+            tilt_score = 1.0 - (abs(horizontal_tilt_deg) + abs(vertical_tilt_deg)) / 90.0  # Normalize to 0-1
+            
+            perpendicularity_score = (ratio_score + tilt_score) / 2.0
+            
+            # Determine orientation information (simplified - no hysteresis)
+            orientation_info = "perpendicular"
+            
+            # Use a lower threshold for more responsive control
+            responsive_threshold = 10  # degrees
+            
+            if abs(horizontal_tilt_deg) > responsive_threshold:
+                if horizontal_tilt_deg > 0:
+                    orientation_info = "tilted_left"
+                else:
+                    orientation_info = "tilted_right"
+            elif abs(vertical_tilt_deg) > responsive_threshold:
+                if vertical_tilt_deg > 0:
+                    orientation_info = "tilted_down"
+                else:
+                    orientation_info = "tilted_up"
+            else:
+                orientation_info = "perpendicular"
+            
+            # Debug information
+            print(f"Perpendicularity analysis:")
+            print(f"  Horizontal ratio: {horizontal_ratio:.3f}, Vertical ratio: {vertical_ratio:.3f}")
+            print(f"  Horizontal tilt: {horizontal_tilt_deg:.1f}°, Vertical tilt: {vertical_tilt_deg:.1f}°")
+            print(f"  Ratio score: {ratio_score:.3f}, Tilt score: {tilt_score:.3f}")
+            print(f"  Responsive threshold: {responsive_threshold}°")
+            print(f"  Current orientation: {orientation_info}")
+            
+            return perpendicularity_score, orientation_info
+            
+        except Exception as e:
+            print(f"Error calculating perpendicularity: {e}")
+            return 0.5, "error"
     
     def draw_aruco_info(self, frame, tags):
         """Draw Aruco tag information on the frame"""
@@ -299,6 +622,17 @@ class ArucoVisualServoing:
             center_x, center_y = tag['center']
             cv2.circle(frame, (center_x, center_y), 5, (255, 0, 0), -1)
             
+            # Calculate and display perpendicularity information
+            perpendicularity_score, orientation_info = self.calculate_perpendicularity(tag['corners'])
+            
+            # Color code based on perpendicularity
+            if perpendicularity_score > 0.9:
+                color = (0, 255, 0)  # Green for good perpendicularity
+            elif perpendicularity_score > 0.7:
+                color = (0, 255, 255)  # Yellow for moderate perpendicularity
+            else:
+                color = (0, 0, 255)  # Red for poor perpendicularity
+            
             # Draw tag ID
             cv2.putText(frame, f"ID: {tag['id']}", (center_x + 10, center_y - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
@@ -306,6 +640,22 @@ class ArucoVisualServoing:
             # Draw distance
             cv2.putText(frame, f"Dist: {tag['estimated_distance']:.2f}m", (center_x + 10, center_y + 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Draw perpendicularity information
+            cv2.putText(frame, f"Perp: {perpendicularity_score:.2f}", (center_x + 10, center_y + 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            cv2.putText(frame, f"Orient: {orientation_info}", (center_x + 10, center_y + 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+            
+            # Draw orientation indicators
+            if orientation_info == "tilted_left":
+                cv2.arrowedLine(frame, (center_x - 30, center_y), (center_x - 10, center_y), (0, 0, 255), 2)
+            elif orientation_info == "tilted_right":
+                cv2.arrowedLine(frame, (center_x + 10, center_y), (center_x + 30, center_y), (0, 0, 255), 2)
+            elif orientation_info == "tilted_up":
+                cv2.arrowedLine(frame, (center_x, center_y - 30), (center_x, center_y - 10), (0, 0, 255), 2)
+            elif orientation_info == "tilted_down":
+                cv2.arrowedLine(frame, (center_x, center_y + 10), (center_x, center_y + 30), (0, 0, 255), 2)
         
         # Draw target center line
         cv2.line(frame, (self.target_center_x, 0), (self.target_center_x, frame.shape[0]), (0, 255, 255), 2)
@@ -318,12 +668,29 @@ class ArucoVisualServoing:
     
     def draw_status(self, frame):
         """Draw current status on the frame"""
+        # Color code the state
+        if self.state == "positioned":
+            color = (0, 255, 0)  # Green for positioned
+        elif self.state == "searching":
+            color = (0, 255, 255)  # Yellow for searching
+        else:
+            color = (0, 0, 255)  # Red for other states
+        
         status_text = f"State: {self.state.upper()}"
-        cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+        cv2.putText(frame, status_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
+        
+        # Draw current movement command
+        movement_type = self.get_movement_type()
+        movement_text = f"Movement: {movement_type}"
+        cv2.putText(frame, movement_text, (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Draw target distance
         target_text = f"Target Distance: {self.target_distance}m"
-        cv2.putText(frame, target_text, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(frame, target_text, (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        
+        # Draw perpendicularity target
+        perp_text = f"Target Perpendicularity: 0.9+"
+        cv2.putText(frame, perp_text, (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     async def recv_camera_stream(self, track: MediaStreamTrack):
         """Receive video frames and process them"""
@@ -441,9 +808,10 @@ async def main():
     
     print("Aruco Visual Servoing Robot")
     print("===========================")
-    print("1. Test movement")
-    print("2. Start visual servoing")
-    print("Enter choice (1 or 2): ", end="")
+    print("1. Test basic movement")
+    print("2. Test direct movement commands")
+    print("3. Start visual servoing")
+    print("Enter choice (1, 2, or 3): ", end="")
     
     try:
         choice = input().strip()
@@ -451,6 +819,15 @@ async def main():
         if await servoing.connect():
             if choice == "1":
                 await servoing.test_movement()
+            elif choice == "2":
+                print("Testing direct movement commands...")
+                await servoing.direct_move("forward", 2.0)
+                await servoing.direct_move("backward", 2.0)
+                await servoing.direct_move("left", 2.0)
+                await servoing.direct_move("right", 2.0)
+                await servoing.direct_move("rotate_left", 2.0)
+                await servoing.direct_move("rotate_right", 2.0)
+                print("Direct movement test completed")
             else:
                 print("Starting Aruco tag detection and positioning...")
                 print("Press 'q' to quit")
