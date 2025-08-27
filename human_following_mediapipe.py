@@ -57,8 +57,8 @@ class HumanFollowerMediaPipe:
         self.center_tolerance = 20  # Increased tolerance for more responsive turning
         self.turn_speed = 0.8  # Reduced angular velocity for slower turning
         self.move_speed = 0.6  # Reduced forward movement speed for slower approach
-        # self.min_pose_confidence = 0.8#0.5  # Minimum confidence for pose detection
-        self.min_pose_confidence = 0.6 # Minimum confidence for pose detection
+        # self.min_pose_confidence = 0.8#0.5  # Minimum confidence for pose detection ultralytics
+        self.min_pose_confidence = 0.6 # Minimum confidence for pose detection mediapipe
         self.min_landmarks_tracked = 20 # Minimum number of landmarks tracked to consider the skeleton visible
         self.area_ratio_threshold = 0.30  # Threshold for area ratio to maintain greater distance
         
@@ -743,7 +743,7 @@ class HumanFollowerMediaPipe:
                             print("No movement - skeleton centered or too close")
                         
                         # Debug: Show current movement values
-                        print(f"Current movement state: {self.current_movement}")
+                        # print(f"Current movement state: {self.current_movement}")
                         
                         # Log comprehensive tracking information for debugging
                         # if humans:
