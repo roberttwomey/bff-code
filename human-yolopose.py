@@ -56,7 +56,7 @@ class HumanFollower:
         self.center_tolerance = 5  # Reduced tolerance for more precise centering
         self.turn_speed = 1.5  # Increased angular velocity for faster turning
         self.move_speed = 1.25#1.5  # Increased forward movement speed for faster approach
-        self.min_human_confidence = 0.75  # Minimum confidence for human detection
+        self.min_human_confidence = 0.85  # Minimum confidence for human detection
         
         # Control flags
         self.is_following = False
