@@ -308,30 +308,53 @@ class HumanFollower:
             # Small corrections even when close to center
             turn_z = -0.3 * np.clip(offset_x / self.target_center_x, -0.5, 0.5)
         
-        # Enhanced forward movement based on pose information
-        area_ratio = best_human['area'] / (1280 * 720)  # Normalize by frame area
-        
-        if area_ratio < 0.25:  # Threshold for close approach
-            # Base forward speed
-            base_speed = self.move_speed
-            
-            # Distance factor - slower when closer
-            distance_factor = 1 - area_ratio * 2
-            
-            # Centering factor - slower when not well centered
-            centering_factor = 1 - (abs(offset_x) / self.target_center_x) * 0.3
-            
-            # Pose stability factor - move more confidently when pose is stable
-            pose_factor = max(0.7, pose_stability)
-            
-            # Combine factors to get final forward speed
-            move_x = base_speed * distance_factor * centering_factor * pose_factor
-            
-            # Minimum forward movement
-            move_x = max(move_x, 0.3)
+        # Check if legs are detected - stop if not
+        legs_detected = self.are_legs_detected(best_human)
+        if not legs_detected:
+            # Stop approaching if legs are not detected
+            move_x = 0.0
+            print(f"Stopping approach - legs not detected")
         else:
-            # When very close, slow down but maintain some movement
-            move_x = 0.1
+            # Enhanced forward movement based on feet-to-hips height ratio
+            height_ratio = self.calculate_feet_to_hips_height_ratio(best_human)
+            
+            # Back off when feet-to-hips height is larger than 60% of screen
+            if height_ratio > 0.6:
+                # Back off - move backward to maintain safe distance
+                base_speed = self.move_speed * 0.5  # Moderate backward speed
+                distance_factor = (height_ratio - 0.6) * 2  # More aggressive backing off as it gets closer
+                centering_factor = 1 - (abs(offset_x) / self.target_center_x) * 0.3
+                pose_factor = max(0.7, pose_stability)
+                move_x = -base_speed * distance_factor * centering_factor * pose_factor  # Negative for backward
+                print(f"Backing off - height ratio {height_ratio:.2f} > 0.6, backing off at speed {abs(move_x):.2f}")
+            elif height_ratio > 0.4:
+                # Slow down significantly when getting close (40-60% of screen)
+                base_speed = self.move_speed * 0.3  # Much slower
+                distance_factor = 1 - (height_ratio - 0.4) * 2  # Gradual slowdown
+                centering_factor = 1 - (abs(offset_x) / self.target_center_x) * 0.3
+                pose_factor = max(0.7, pose_stability)
+                move_x = base_speed * distance_factor * centering_factor * pose_factor
+                print(f"Slowing down - height ratio {height_ratio:.2f} > 0.4")
+            elif height_ratio > 0.2:
+                # Moderate speed when at medium distance (20-40% of screen)
+                base_speed = self.move_speed * 0.7  # Moderate speed
+                distance_factor = 1 - height_ratio * 1.5
+                centering_factor = 1 - (abs(offset_x) / self.target_center_x) * 0.3
+                pose_factor = max(0.7, pose_stability)
+                move_x = base_speed * distance_factor * centering_factor * pose_factor
+                print(f"Moderate approach - height ratio {height_ratio:.2f}")
+            else:
+                # Normal speed when far away (< 20% of screen)
+                base_speed = self.move_speed
+                distance_factor = 1 - height_ratio * 2
+                centering_factor = 1 - (abs(offset_x) / self.target_center_x) * 0.3
+                pose_factor = max(0.7, pose_stability)
+                move_x = base_speed * distance_factor * centering_factor * pose_factor
+                print(f"Normal approach - height ratio {height_ratio:.2f}")
+            
+            # Ensure minimum movement when not stopped
+            if move_x > 0:
+                move_x = max(move_x, 0.1)
         
         # Add lateral movement based on pose orientation (optional)
         # This could help the robot position itself better relative to the human
@@ -415,6 +438,141 @@ class HumanFollower:
             return shoulder_center_x - self.target_center_x
         
         return 0
+    
+    def calculate_feet_to_hips_height_ratio(self, human):
+        """Calculate the height ratio from feet to hips relative to screen height"""
+        if human['keypoints'] is None:
+            return 0.0
+        
+        keypoints = human['keypoints']
+        
+        # Get hip positions (keypoints 11 and 12)
+        left_hip = None
+        right_hip = None
+        if len(keypoints) > 12:
+            if len(keypoints[11]) >= 3 and keypoints[11][2] > 0.5:  # left hip
+                left_hip = keypoints[11]
+            if len(keypoints[12]) >= 3 and keypoints[12][2] > 0.5:  # right hip
+                right_hip = keypoints[12]
+        
+        # Get ankle positions (keypoints 15 and 16)
+        left_ankle = None
+        right_ankle = None
+        if len(keypoints) > 16:
+            if len(keypoints[15]) >= 3 and keypoints[15][2] > 0.5:  # left ankle
+                left_ankle = keypoints[15]
+            if len(keypoints[16]) >= 3 and keypoints[16][2] > 0.5:  # right ankle
+                right_ankle = keypoints[16]
+        
+        # Calculate average hip and ankle positions
+        hip_y = None
+        ankle_y = None
+        
+        if left_hip is not None and right_hip is not None:
+            hip_y = (left_hip[1] + right_hip[1]) / 2
+        elif left_hip is not None:
+            hip_y = left_hip[1]
+        elif right_hip is not None:
+            hip_y = right_hip[1]
+        
+        if left_ankle is not None and right_ankle is not None:
+            ankle_y = (left_ankle[1] + right_ankle[1]) / 2
+        elif left_ankle is not None:
+            ankle_y = left_ankle[1]
+        elif right_ankle is not None:
+            ankle_y = right_ankle[1]
+        
+        # Calculate height from feet to hips
+        if hip_y is not None and ankle_y is not None:
+            feet_to_hips_height = abs(ankle_y - hip_y)
+            # Return as ratio of screen height (assuming 720p)
+            screen_height = 720
+            return feet_to_hips_height / screen_height
+        
+        return 0.0
+    
+    def are_legs_detected(self, human):
+        """Check if legs/ankles are detected for the human"""
+        if human['keypoints'] is None:
+            return False
+        
+        keypoints = human['keypoints']
+        
+        # Check if ankle keypoints (15 and 16) are detected with good confidence
+        left_ankle_detected = False
+        right_ankle_detected = False
+        
+        if len(keypoints) > 15:
+            if len(keypoints[15]) >= 3 and keypoints[15][2] > 0.5:  # left ankle
+                left_ankle_detected = True
+        if len(keypoints) > 16:
+            if len(keypoints[16]) >= 3 and keypoints[16][2] > 0.5:  # right ankle
+                right_ankle_detected = True
+        
+        # Return True if at least one ankle is detected
+        return left_ankle_detected or right_ankle_detected
+    
+    def draw_feet_to_hips_line(self, frame, keypoints):
+        """Draw a line from feet to hips to visualize the height measurement"""
+        if keypoints is None:
+            return
+        
+        # Get hip positions (keypoints 11 and 12)
+        left_hip = None
+        right_hip = None
+        if len(keypoints) > 12:
+            if len(keypoints[11]) >= 3 and keypoints[11][2] > 0.5:  # left hip
+                left_hip = keypoints[11]
+            if len(keypoints[12]) >= 3 and keypoints[12][2] > 0.5:  # right hip
+                right_hip = keypoints[12]
+        
+        # Get ankle positions (keypoints 15 and 16)
+        left_ankle = None
+        right_ankle = None
+        if len(keypoints) > 16:
+            if len(keypoints[15]) >= 3 and keypoints[15][2] > 0.5:  # left ankle
+                left_ankle = keypoints[15]
+            if len(keypoints[16]) >= 3 and keypoints[16][2] > 0.5:  # right ankle
+                right_ankle = keypoints[16]
+        
+        # Calculate average positions
+        hip_y = None
+        ankle_y = None
+        
+        if left_hip is not None and right_hip is not None:
+            hip_y = (left_hip[1] + right_hip[1]) / 2
+            hip_x = (left_hip[0] + right_hip[0]) / 2
+        elif left_hip is not None:
+            hip_y = left_hip[1]
+            hip_x = left_hip[0]
+        elif right_hip is not None:
+            hip_y = right_hip[1]
+            hip_x = right_hip[0]
+        
+        if left_ankle is not None and right_ankle is not None:
+            ankle_y = (left_ankle[1] + right_ankle[1]) / 2
+            ankle_x = (left_ankle[0] + right_ankle[0]) / 2
+        elif left_ankle is not None:
+            ankle_y = left_ankle[1]
+            ankle_x = left_ankle[0]
+        elif right_ankle is not None:
+            ankle_y = right_ankle[1]
+            ankle_x = right_ankle[0]
+        
+        # Draw the height line if both points are available
+        if hip_y is not None and ankle_y is not None:
+            # Draw line from ankle to hip
+            cv2.line(frame, (int(ankle_x), int(ankle_y)), (int(hip_x), int(hip_y)), (255, 255, 0), 3)
+            
+            # Draw circles at the endpoints
+            cv2.circle(frame, (int(ankle_x), int(ankle_y)), 5, (0, 255, 255), -1)  # Yellow circle at ankle
+            cv2.circle(frame, (int(hip_x), int(hip_y)), 5, (255, 0, 255), -1)  # Magenta circle at hip
+            
+            # Add labels
+            cv2.putText(frame, "Ankle", (int(ankle_x) + 10, int(ankle_y)), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+            cv2.putText(frame, "Hip", (int(hip_x) + 10, int(hip_y)), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
     
     def draw_pose_keypoints(self, frame, keypoints):
         """Draw pose keypoints on the frame"""
@@ -538,9 +696,12 @@ class HumanFollower:
                         
                         # Log movement commands
                         if abs(move_x) > 0.01 or abs(turn_z) > 0.01:
-                            print(f"Movement command: x={move_x:.2f} (forward), y={move_y:.2f}, z={turn_z:.2f}")
+                            direction_text = "forward" if move_x > 0 else "backward" if move_x < 0 else "stopped"
+                            print(f"Movement command: x={move_x:.2f} ({direction_text}), y={move_y:.2f}, z={turn_z:.2f}")
                             if move_x > 0:
                                 print(f"  -> Moving FORWARD (positive x) at speed {move_x:.2f}")
+                            elif move_x < 0:
+                                print(f"  -> Moving BACKWARD (negative x) at speed {abs(move_x):.2f}")
                             if abs(turn_z) > 0.01:
                                 direction = "LEFT" if turn_z > 0 else "RIGHT"
                                 print(f"  -> Turning {direction} at speed {abs(turn_z):.2f}")
@@ -552,10 +713,33 @@ class HumanFollower:
                             # Draw bounding box
                             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                             
-                            # Draw confidence and pose stability
+                            # Calculate height ratio for display
+                            height_ratio = self.calculate_feet_to_hips_height_ratio(human)
                             pose_stability = self.calculate_pose_stability(human)
-                            cv2.putText(frame, f"Human: {human['confidence']:.2f} | Pose: {pose_stability:.2f}", 
-                                      (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            legs_detected = self.are_legs_detected(human)
+                            
+                            # Draw confidence, pose stability, height ratio, and leg detection
+                            info_text = f"Human: {human['confidence']:.2f} | Pose: {pose_stability:.2f} | Height: {height_ratio:.2f} | Legs: {'Yes' if legs_detected else 'No'}"
+                            cv2.putText(frame, info_text, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                            
+                            # Draw height ratio status
+                            if not legs_detected:
+                                status_text = "STOPPED - No Legs Detected!"
+                                color = (0, 0, 255)  # Red
+                            elif height_ratio > 0.6:
+                                status_text = "BACKING OFF - Too Close!"
+                                color = (0, 0, 255)  # Red
+                            elif height_ratio > 0.4:
+                                status_text = "SLOWING DOWN"
+                                color = (0, 165, 255)  # Orange
+                            elif height_ratio > 0.2:
+                                status_text = "MODERATE SPEED"
+                                color = (0, 255, 255)  # Yellow
+                            else:
+                                status_text = "NORMAL SPEED"
+                                color = (0, 255, 0)  # Green
+                            
+                            cv2.putText(frame, status_text, (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                             
                             # Draw pose keypoints if available
                             if human['keypoints'] is not None:
@@ -566,6 +750,10 @@ class HumanFollower:
                             cv2.circle(frame, (torso_x, torso_y), 5, (255, 0, 0), -1)
                             cv2.putText(frame, "Torso", (torso_x + 10, torso_y), 
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
+                            
+                            # Draw feet-to-hips height line if keypoints are available
+                            if human['keypoints'] is not None:
+                                self.draw_feet_to_hips_line(frame, human['keypoints'])
                         
                         self.last_human_detected = time.time()
                     else:
