@@ -34,5 +34,9 @@ if __name__ == '__main__':
 
     custom = Custom()
     custom.go2_utlidar_switch("OFF")
+    time.sleep(3)
+    
+    custom.go2_utlidar_switch("ON")
+    time.sleep(3)
 
 
