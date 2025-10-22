@@ -62,7 +62,8 @@ async def main():
     try:
         # Choose a connection method (uncomment the correct one)
         # conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="192.168.8.181")
-        conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="192.168.4.30")
+        # conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="192.168.4.30")
+        conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="unitree.local")
         # conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, serialNumber="B42D2000XXXXXXXX")
         # conn = Go2WebRTCConnection(WebRTCConnectionMethod.Remote, serialNumber="B42D2000XXXXXXXX", username="email@gmail.com", password="pass")
         # conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalAP)
@@ -519,8 +520,9 @@ async def main():
         #     print(current_message)
         #     #display_data(current_message)
 
-        # # Subscribe to the sportmode status data and use the callback function to process incoming messages.
+        # Subscribe to the sportmode status data and use the callback function to process incoming messages.
         # conn.datachannel.pub_sub.subscribe(RTC_TOPIC['UWB_STATE'], uwbstate_callback)
+
 
         # https://github.com/unitreerobotics/unitree_sdk2/blob/008157a44c9bb6a7ec8b0433d6d4c3e0cce27aa6/include/unitree/robot/go2/utrack/utrack_api.hpp#L10
 
@@ -529,17 +531,17 @@ async def main():
         # is_tracking - 1003
 
         # doesn't work
-        print("enable UWB")
-        result = await conn.datachannel.pub_sub.publish_request_new(
-            RTC_TOPIC["UWB_REQ"],
-            {   
-                "api_id": 1001,
-                # "parameter": {"data": True}
-            }
-        )
+        # print("enable UWB")
+        # result = await conn.datachannel.pub_sub.publish_request_new(
+        #     RTC_TOPIC["UWB_REQ"],
+        #     {   
+        #         "api_id": 1001,
+        #         # "parameter": {"data": True}
+        #     }
+        # )
 
-        await asyncio.sleep(5)
-        print(result)
+        # await asyncio.sleep(5)
+        # print(result)
 
 
         # # === Gas Sensor state - TODO ===
@@ -552,6 +554,16 @@ async def main():
 
         # # Subscribe to the sportmode status data and use the callback function to process incoming messages.
         # conn.datachannel.pub_sub.subscribe(RTC_TOPIC['GAS_SENSOR'], uwbstate_callback)
+
+        # === Lidar switch - ? ===
+        
+        print("lidar switch off")
+        
+        # Publish a message to turn the LIDAR sensor off.
+        conn.datachannel.pub_sub.publish_without_callback("rt/utlidar/switch", "off")
+
+        await asyncio.sleep(3)
+        print(result)
 
 
         # Keep the program running for a while
