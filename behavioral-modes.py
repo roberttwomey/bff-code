@@ -624,13 +624,13 @@ async def main():
 
         # === Lidar switch - ? ===
         
-        print("lidar switch off")
+        # print("lidar switch off")
         
-        # Publish a message to turn the LIDAR sensor off.
-        conn.datachannel.pub_sub.publish_without_callback("rt/utlidar/switch", "off")
+        # # Publish a message to turn the LIDAR sensor off.
+        # conn.datachannel.pub_sub.publish_without_callback("rt/utlidar/switch", "off")
 
-        await asyncio.sleep(3)
-        print("LIDAR switch command sent")
+        # await asyncio.sleep(3)
+        # print("LIDAR switch command sent")
 
 
         # Keep the program running and show idle status

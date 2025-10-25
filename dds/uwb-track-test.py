@@ -21,27 +21,44 @@ if __name__ == "__main__":
     client._RegistApi(1002, 0) # get - 1002
     client._RegistApi(1003, 0) # is_tracking - 1003
 
+    # start tracking
+    enabled = True
     p = {}
-    p["enable"] = 1
+    p["enable"] = 1 if enabled else 0
     parameter = json.dumps(p)
 
     code, result  = client._Call(1001, parameter)
 
     if code != 0:
-        print("set tracking enable error. code:", code, result)
+        print(f"set tracking enable: {enabled} error. code:", code, result)
     else:
-        print("set tracking enable success.", result)
+        print(f"set tracking enable: {enabled} success.", result)
+    
+    time.sleep(10)
+
+    # disable tracking
+    enabled = False
+    p = {}
+    p["enable"] = 1 if enabled else 0
+    parameter = json.dumps(p)
+
+    code, result  = client._Call(1001, parameter)
+
+    if code != 0:
+        print(f"set tracking enable: {enabled} error. code:", code, result)
+    else:
+        print(f"set tracking enable: {enabled} success.", result)
     
     time.sleep(3)
 
-    # get
-    p = {}
-    p["enable"] = 0
-    parameter = json.dumps(p)
-    code, result  = client._Call(1002, parameter)
+    # # get
+    # p = {}
+    # p["enable"] = 0
+    # parameter = json.dumps(p)
+    # code, result  = client._Call(1002, parameter)
 
-    if code != 0:
-        print("get tracking enable error. code:", code, result)
-    else:
-        print("get tracking enable success.", result)
+    # if code != 0:
+    #     print("get tracking enable error. code:", code, result)
+    # else:
+    #     print("get tracking enable success.", result)
 
