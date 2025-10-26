@@ -13,7 +13,32 @@ from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.rpc.client import Client
 from unitree_sdk2py.utils.crc import CRC
-import unitree_legged_const as go2
+
+
+# import unitree_legged_const as go2
+class Go2Constants:
+    LegID = {
+        "FR_0": 0,  # Front right hip
+        "FR_1": 1,  # Front right thigh
+        "FR_2": 2,  # Front right calf
+        "FL_0": 3,
+        "FL_1": 4,
+        "FL_2": 5,
+        "RR_0": 6,
+        "RR_1": 7,
+        "RR_2": 8,
+        "RL_0": 9,
+        "RL_1": 10,
+        "RL_2": 11,
+    }
+    
+    HIGHLEVEL = 0xEE
+    LOWLEVEL = 0xFF
+    TRIGERLEVEL = 0xF0
+    PosStopF = 2.146e9
+    VelStopF = 16000.0
+
+go2 = Go2Constants()
 
 ethernet_interface = "enP8p1s0"
 
@@ -112,8 +137,10 @@ class BehavioralStateMachine:
                 )
                 
                 if self.controller_active:
+                    if time.time() - self.last_activity_time > 1:
+                        print(f"Controller activity detected - Joysticks: Lx={lx:.2f}, Rx={rx:.2f}, Ry={ry:.2f}, Ly={ly:.2f}")
                     self.last_activity_time = time.time()
-                    print(f"Controller activity detected - Joysticks: Lx={lx:.2f}, Rx={rx:.2f}, Ry={ry:.2f}, Ly={ly:.2f}")
+                    
         except Exception as e:
             print(f"Error checking controller activity: {e}")
     
@@ -277,17 +304,18 @@ class BehavioralStateMachine:
             print("Controller activity detected while dreaming. Waking up to WALKING mode...")
             
             # Ensure MFC mode is active before standing
-            self.ensure_mfc_mode()
+            # self.ensure_mfc_mode()
             
             # Turn on lidar before standing up
             self.set_lidar_state("ON")
-            time.sleep(2)
+            time.sleep(1)
 
             self.stand_up()
-            time.sleep(1)
+            time.sleep(2)
             
             self.balance_stand()
-            time.sleep(1)
+            time.sleep(2)
+
 
             self.transition_to_state(RobotState.WALKING_MODE)
             self.last_activity_time = time.time()
