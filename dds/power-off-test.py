@@ -55,6 +55,21 @@ class Custom:
         print("Asking robot to stand down...")
         self.sport_client.StandDown()
     
+    def stand_up(self):
+        """Asking robot to stand up"""
+        print("Asking robot to stand up...")
+        self.sport_client.StandUp()
+
+    def damp_mode(self):
+        """Asking robot to damp mode"""
+        print("Asking robot to damp mode...")
+        self.sport_client.Damp()
+    
+    def balance_stand(self):
+        """Asking robot to balance stand"""
+        print("Asking robot to balance stand...")
+        self.sport_client.BalanceStand()
+
     def release_mfc_mode(self):
         """Release MFC mode service"""
         print("Checking and releasing MFC mode...")
@@ -70,10 +85,33 @@ class Custom:
             if result['name']:
                 print(f"Warning: Mode still active: {result['name']}")
             else:
-                print("MFC mode released successfully")
+                print(f"MFC mode released successfully {result}")
         else:
             print("No active mode found, continuing...")
         
+    def start_mfc_mode(self):
+        """Start MFC mode service"""
+
+        print("Checking MFC mode...")
+        status, result = self.motion_switcher.CheckMode()
+
+        if result['name']:
+            print(f"Current mode: {result['name']}...")
+
+        else:
+            print("No active mode found, starting MFC mode...")
+
+        print("Starting MFC mode...")
+        self.motion_switcher.SelectMode("mcf")
+        
+        # Verify mode was started
+        status, result = self.motion_switcher.CheckMode()
+        if result['name']:
+            print(f"MFC mode started successfully: {result['name']}")
+        else:
+            print("Warning: MFC mode not started")
+        
+
     def send_bms_off_command(self):
         """Send BMS command to turn off (off=0xA5)"""
         print("Sending BMS off command...")
@@ -106,13 +144,28 @@ if __name__ == '__main__':
     
     # Step 1: Make the robot stand down
     custom.stand_down()
-    time.sleep(10)
+    time.sleep(3)
 
-    # Step 1: Release MFC mode service
+    # custom.damp_mode()
+    # time.sleep(3)
+
+    # Step 2: Release MFC mode service
     custom.release_mfc_mode()
     time.sleep(2)
         
-    # Step 3: Send the BMS off command
+    # Step 3: Start MFC mode service
+    custom.start_mfc_mode()
+    time.sleep(2)
+
+    # # Step 3: Stand up
+    # custom.stand_up()
+    # time.sleep(2)
+   
+    # # Step 4: Balance stand
+    # custom.balance_stand()
+    # time.sleep(2)
+
+    # # Step 3: Send the BMS off command
     custom.send_bms_off_command()
     time.sleep(2)
 

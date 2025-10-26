@@ -7,6 +7,8 @@ import enum
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_, unitree_go_msg_dds__LowState_
+from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.rpc.client import Client
@@ -46,8 +48,13 @@ class BehavioralStateMachine:
         self.vui_client.SetTimeout(3.0)
         self.vui_client._RegistApi(1007, 0)
         
+        # Lidar publisher
+        self.lidar_publisher = ChannelPublisher("rt/utlidar/switch", String_)
+        self.lidar_publisher.Init()
+        self.lidar_cmd = std_msgs_msg_dds__String_()
+        
         # State management
-        self.current_state = RobotState.WALKING_MODE
+        self.current_state = RobotState.POWER_OFF  # None indicates no state has been set yet
         self.last_activity_time = time.time()
         self.idle_timeout = 30  # seconds
         self.monitoring = True
@@ -126,6 +133,24 @@ class BehavioralStateMachine:
             print(f"Set color {color} success")
             return True
     
+    def set_lidar_state(self, status):
+        """Set lidar on or off"""
+        if status == "OFF":
+            self.lidar_cmd.data = "OFF"
+        elif status == "ON":
+            self.lidar_cmd.data = "ON"
+        else:
+            print(f"Invalid lidar status: {status}")
+            return False
+        
+        try:
+            self.lidar_publisher.Write(self.lidar_cmd)
+            print(f"Lidar set to {status}")
+            return True
+        except Exception as e:
+            print(f"Error setting lidar to {status}: {e}")
+            return False
+    
     def transition_to_state(self, new_state: RobotState):
         """Transition to a new state and update VUI color"""
         if self.current_state == new_state:
@@ -140,11 +165,11 @@ class BehavioralStateMachine:
             RobotState.SPEAKING_MODE: "green",
             RobotState.THINKING_MODE: "purple",
             RobotState.DREAMING_MODE: "cyan",
-            RobotState.POWER_OFF: "white"  # Will turn off
+            RobotState.POWER_OFF: "red"  # Will turn off
         }
         
-        color = color_map.get(new_state, "white")
-        self.set_vui_color(color, duration=0)  # duration=0 for persistent
+        color = color_map.get(new_state, "yellow")
+        self.set_vui_color(color, duration=600)  # duration=0 for persistent
     
     def stand_down(self):
         """Make robot stand down"""
@@ -155,6 +180,15 @@ class BehavioralStateMachine:
         except Exception as e:
             print(f"Error in StandDown: {e}")
     
+    def stand_up(self):
+        """Make robot stand up"""
+        print("Standing up...")
+        try:
+            self.sport_client.StandUp()
+            print("StandUp command sent")
+        except Exception as e:
+            print(f"Error in StandUp: {e}")
+
     def balance_stand(self):
         """Make robot balance stand"""
         print("Entering balance stand...")
@@ -186,6 +220,20 @@ class BehavioralStateMachine:
         except Exception as e:
             print(f"Error releasing MFC mode: {e}")
     
+    def ensure_mfc_mode(self):
+        """Ensure robot is in MFC mode"""
+        print("Ensuring MFC mode...")
+        try:
+            status, result = self.motion_switcher.CheckMode()
+            if result['name'] != 'mfc':
+                print(f"Current mode: {result['name']}, switching to MFC...")
+                self.motion_switcher.SelectMode("mfc")
+                time.sleep(2)
+            else:
+                print("Already in MFC mode")
+        except Exception as e:
+            print(f"Error ensuring MFC mode: {e}")
+    
     def send_bms_off_command(self):
         """Send BMS command to turn off (off=0xA5)"""
         print("Sending BMS off command...")
@@ -216,16 +264,31 @@ class BehavioralStateMachine:
         # If in WALKING mode and idle for too long, transition to DREAMING
         if self.current_state == RobotState.WALKING_MODE and idle_duration >= self.idle_timeout:
             print(f"Robot idle for {idle_duration:.1f}s. Transitioning to DREAMING...")
+            # Turn off lidar before going prone
+            self.transition_to_state(RobotState.DREAMING_MODE)
             self.stand_down()
             time.sleep(2)
-            self.transition_to_state(RobotState.DREAMING_MODE)
+            self.set_lidar_state("OFF")
+
     
     def check_wake_from_dreaming(self):
         """Check if controller activity should wake from DREAMING to WALKING"""
         if self.current_state == RobotState.DREAMING_MODE and self.controller_active:
             print("Controller activity detected while dreaming. Waking up to WALKING mode...")
-            self.balance_stand()
+            
+            # Ensure MFC mode is active before standing
+            self.ensure_mfc_mode()
+            
+            # Turn on lidar before standing up
+            self.set_lidar_state("ON")
             time.sleep(2)
+
+            self.stand_up()
+            time.sleep(1)
+            
+            self.balance_stand()
+            time.sleep(1)
+
             self.transition_to_state(RobotState.WALKING_MODE)
             self.last_activity_time = time.time()
     
@@ -234,13 +297,25 @@ class BehavioralStateMachine:
         print("Starting Behavioral State Machine...")
         print(f"Idle timeout: {self.idle_timeout}s")
         
+        # Turn on lidar initially
+        self.set_lidar_state("ON")
+        time.sleep(2)
+
         # Initial state: WALKING_MODE
         self.transition_to_state(RobotState.WALKING_MODE)
         self.last_activity_time = time.time()
-        
+
+        # Ensure MFC mode is active
+        self.ensure_mfc_mode()
+        time.sleep(2)
+                
         # Make robot stand up
+        self.stand_up()
+        time.sleep(2)
+
+        # Start balance stand
         self.balance_stand()
-        time.sleep(3)
+        time.sleep(2)
     
     def run_state_machine(self):
         """Main state machine loop"""
@@ -264,20 +339,20 @@ class BehavioralStateMachine:
             print("\n\nCtrl+C detected. Initiating POWER_OFF sequence...")
             self.transition_to_state(RobotState.POWER_OFF)
             
-            # Release MFC mode
-            self.release_mfc_mode()
-            time.sleep(2)
-            
             # Stand down
             self.stand_down()
-            time.sleep(10)
+            time.sleep(2)
+
+            # Release MFC mode
+            # self.release_mfc_mode()
+            # time.sleep(2)
             
             # Power off
-            self.send_bms_off_command()
-            time.sleep(2)
+            # self.send_bms_off_command()
+            # time.sleep(2)
             
-            print("Power off sequence complete.")
-            self.monitoring = False
+            # print("Power off sequence complete.")
+            # self.monitoring = False
     
     def set_thinking_mode(self):
         """Manually set to thinking mode"""
