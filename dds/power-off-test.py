@@ -7,6 +7,8 @@ from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_, unitree_go_m
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.utils.crc import CRC
+from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
+
 import unitree_legged_const as go2
 
 ethernet_interface = "enP8p1s0"
@@ -33,6 +35,10 @@ class Custom:
         self.motion_switcher = MotionSwitcherClient()
         self.motion_switcher.SetTimeout(10.0)
         self.motion_switcher.Init()
+
+        self.robot_state_client = RobotStateClient()
+        self.robot_state_client.SetTimeout(10.0)
+        self.robot_state_client.Init()
     
     def InitLowCmd(self):
         """Initialize LowCmd with required header and motor values"""
@@ -70,9 +76,9 @@ class Custom:
         print("Asking robot to balance stand...")
         self.sport_client.BalanceStand()
 
-    def release_mfc_mode(self):
-        """Release MFC mode service"""
-        print("Checking and releasing MFC mode...")
+    def release_mcf_mode(self):
+        """Release MCF mode service"""
+        print("Checking and releasing MCF mode...")
         status, result = self.motion_switcher.CheckMode()
         
         if result['name']:
@@ -85,31 +91,48 @@ class Custom:
             if result['name']:
                 print(f"Warning: Mode still active: {result['name']}")
             else:
-                print(f"MFC mode released successfully {result}")
+                print(f"MCF mode released successfully {result}")
         else:
             print("No active mode found, continuing...")
         
-    def start_mfc_mode(self):
-        """Start MFC mode service"""
+    def list_services(self):
+        """List all services"""
+        print("Listing all services...")
 
-        print("Checking MFC mode...")
+        code, result = self.robot_state_client.ServiceList()
+
+        for service in result:
+            print(f"Service: {service.name}, Status: {service.status}, Protect: {service.protect}")
+        # print(f"Services: {result}")
+        
+    def start_mcf_service(self):
+        """Start MCF mode service"""
+        print("Starting MCF mode service...")
+
+        result = self.robot_state_client.ServiceSwitch("mcf", True)
+        if result != 0:
+            print(f"Error starting MCF mode service: {result}")
+        else:
+            print(f"MCF mode service started successfully: {result}")
+
+        print("Checking MCF mode...")
         status, result = self.motion_switcher.CheckMode()
 
         if result['name']:
             print(f"Current mode: {result['name']}...")
 
         else:
-            print("No active mode found, starting MFC mode...")
+            print("No active mode found, starting MCF mode...")
 
-        print("Starting MFC mode...")
+        print("Starting MCF mode...")
         self.motion_switcher.SelectMode("mcf")
         
         # Verify mode was started
         status, result = self.motion_switcher.CheckMode()
         if result['name']:
-            print(f"MFC mode started successfully: {result['name']}")
+                print(f"MCF mode started successfully: {result['name']}")
         else:
-            print("Warning: MFC mode not started")
+            print("Warning: MCF mode not started")
         
 
     def send_bms_off_command(self):
@@ -144,18 +167,21 @@ if __name__ == '__main__':
     
     # Step 1: Make the robot stand down
     custom.stand_down()
-    time.sleep(3)
-
-    # custom.damp_mode()
-    # time.sleep(3)
+    time.sleep(2)
 
     # Step 2: Release MFC mode service
-    custom.release_mfc_mode()
+    custom.release_mcf_mode()
     time.sleep(2)
         
+    # custom.list_services()
+    # time.sleep(2)
+
     # Step 3: Start MFC mode service
-    custom.start_mfc_mode()
-    time.sleep(2)
+    # custom.start_mcf_service()
+    # time.sleep(2)
+
+    # custom.list_services()
+    # time.sleep(2)
 
     # # Step 3: Stand up
     # custom.stand_up()
@@ -165,7 +191,7 @@ if __name__ == '__main__':
     # custom.balance_stand()
     # time.sleep(2)
 
-    # # Step 3: Send the BMS off command
+    # Step 3: Send the BMS off command
     custom.send_bms_off_command()
     time.sleep(2)
 

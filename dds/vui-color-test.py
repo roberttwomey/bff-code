@@ -14,7 +14,17 @@ class Custom:
         self.client = Client('vui')
         self.client.SetTimeout(3.0)
         self.client._RegistApi(1007, 0)
-    
+
+        self.vui_client = VuiClient()
+        self.vui_client.SetTimeout(3.0)
+        self.vui_client.Init()
+
+    def set_brightness(self, brightness=5):
+        self.vui_client.SetBrightness(brightness)
+
+    def get_brightness(self):
+        return self.vui_client.GetBrightness()
+
     def set_color(self, color, duration=5):
         """
         Set the VUI LED color
@@ -35,7 +45,7 @@ class Custom:
         p["time"] = duration
         parameter = json.dumps(p)
         
-        code, result = self.client._Call(1007, parameter)
+        code, result = self.client._Call(1007, parameter) # 1007 is the API ID for setting the color
         
         if code != 0:
             print(f"Set color error. code: {code}, {result}")
@@ -51,7 +61,15 @@ if __name__ == "__main__":
         ChannelFactoryInitialize(0, ethernet_interface)
 
     custom = Custom()
+
+    # custom.set_color("off")
     
+    # custom.set_color("white")
+    # time.sleep(0.5)
+
+    # custom.set_brightness(0) # doesn't work
+    # time.sleep(5)
+
     custom.set_color("purple", 5)
     time.sleep(5)
 

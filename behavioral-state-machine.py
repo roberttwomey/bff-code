@@ -11,6 +11,7 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
+from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
 from unitree_sdk2py.rpc.client import Client
 from unitree_sdk2py.utils.crc import CRC
 
@@ -67,6 +68,11 @@ class BehavioralStateMachine:
         self.motion_switcher = MotionSwitcherClient()
         self.motion_switcher.SetTimeout(10.0)
         self.motion_switcher.Init()
+
+        # Robot state client
+        self.robot_state_client = RobotStateClient()
+        self.robot_state_client.SetTimeout(10.0)
+        self.robot_state_client.Init()
         
         # VUI client for LED colors
         self.vui_client = Client('vui')
@@ -188,14 +194,14 @@ class BehavioralStateMachine:
         
         # Update VUI color based on state
         color_map = {
-            RobotState.WALKING_MODE: "yellow",
+            RobotState.WALKING_MODE: "green",
             RobotState.SPEAKING_MODE: "green",
             RobotState.THINKING_MODE: "purple",
             RobotState.DREAMING_MODE: "cyan",
             RobotState.POWER_OFF: "red"  # Will turn off
         }
         
-        color = color_map.get(new_state, "yellow")
+        color = color_map.get(new_state, "green")
         self.set_vui_color(color, duration=600)  # duration=0 for persistent
     
     def stand_down(self):
@@ -225,9 +231,9 @@ class BehavioralStateMachine:
         except Exception as e:
             print(f"Error in BalanceStand: {e}")
     
-    def release_mfc_mode(self):
-        """Release MFC mode service"""
-        print("Checking and releasing MFC mode...")
+    def release_mcf_mode(self):
+        """Release MCF mode service"""
+        print("Checking and releasing MCF mode...")
         try:
             status, result = self.motion_switcher.CheckMode()
             
@@ -241,25 +247,36 @@ class BehavioralStateMachine:
                 if result['name']:
                     print(f"Warning: Mode still active: {result['name']}")
                 else:
-                    print("MFC mode released successfully")
+                    print("MCF mode released successfully")
             else:
                 print("No active mode found")
         except Exception as e:
-            print(f"Error releasing MFC mode: {e}")
+            print(f"Error releasing MCF mode: {e}")
     
-    def ensure_mfc_mode(self):
-        """Ensure robot is in MFC mode"""
-        print("Ensuring MFC mode...")
+    def start_mcf_service(self):
+        """Start MCF mode service"""
+        print("Starting MCF mode service...")
+        self.robot_state_client.ServiceSwitch("mcf", True)
+        time.sleep(2)
+        print("MCF mode service started successfully")
+
+    def ensure_mcf_mode(self):
+        """Ensure robot is in MCF mode"""
+
+        self.start_mcf_service()
+        time.sleep(2)
+
+        print("Ensuring MCF mode...")
         try:
             status, result = self.motion_switcher.CheckMode()
-            if result['name'] != 'mfc':
-                print(f"Current mode: {result['name']}, switching to MFC...")
-                self.motion_switcher.SelectMode("mfc")
+            if result['name'] != 'mcf':
+                print(f"Current mode: {result['name']}, switching to MCF...")
+                self.motion_switcher.SelectMode("mcf")
                 time.sleep(2)
             else:
-                print("Already in MFC mode")
+                print("Already in MCF mode")
         except Exception as e:
-            print(f"Error ensuring MFC mode: {e}")
+            print(f"Error ensuring MCF mode: {e}")
     
     def send_bms_off_command(self):
         """Send BMS command to turn off (off=0xA5)"""
@@ -303,12 +320,14 @@ class BehavioralStateMachine:
         if self.current_state == RobotState.DREAMING_MODE and self.controller_active:
             print("Controller activity detected while dreaming. Waking up to WALKING mode...")
             
-            # Ensure MFC mode is active before standing
-            # self.ensure_mfc_mode()
+            # Ensure MCF mode is active before standing
+            # self.ensure_mcf_mode()
             
             # Turn on lidar before standing up
             self.set_lidar_state("ON")
             time.sleep(1)
+
+            self.transition_to_state(RobotState.WALKING_MODE)
 
             self.stand_up()
             time.sleep(2)
@@ -316,8 +335,6 @@ class BehavioralStateMachine:
             self.balance_stand()
             time.sleep(2)
 
-
-            self.transition_to_state(RobotState.WALKING_MODE)
             self.last_activity_time = time.time()
     
     def start(self):
@@ -333,8 +350,8 @@ class BehavioralStateMachine:
         self.transition_to_state(RobotState.WALKING_MODE)
         self.last_activity_time = time.time()
 
-        # Ensure MFC mode is active
-        self.ensure_mfc_mode()
+        # Ensure MCF mode is active
+        self.ensure_mcf_mode()
         time.sleep(2)
                 
         # Make robot stand up
@@ -371,9 +388,9 @@ class BehavioralStateMachine:
             self.stand_down()
             time.sleep(2)
 
-            # Release MFC mode
-            # self.release_mfc_mode()
-            # time.sleep(2)
+            # Release MCF mode
+            self.release_mcf_mode()
+            time.sleep(2)
             
             # Power off
             # self.send_bms_off_command()
