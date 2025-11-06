@@ -1,0 +1,13 @@
+# Core dependencies for human following script
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+# asyncio
+# go2-webrtc-driver
+
+# Video processing and display
+# aiortc>=1.5.0
+
+# Optional: For better performance
+# torch>=2.0.0
+# torchvision>=0.15.0

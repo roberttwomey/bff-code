@@ -1,0 +1,6 @@
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+numpy>=1.21.0
+asyncio
+aiortc
+go2-webrtc-driver

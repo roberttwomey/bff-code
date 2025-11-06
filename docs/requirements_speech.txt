@@ -1,0 +1,13 @@
+# Core dependencies from original chat_with_snapshots.py
+openai>=1.40
+python-dotenv
+numpy
+Pillow
+
+# Speech recognition and synthesis dependencies
+SpeechRecognition>=3.10.0
+pyttsx3>=2.90
+PyAudio>=0.2.11
+
+# Optional: Open3D for better PLY file handling
+# open3d>=0.17.0

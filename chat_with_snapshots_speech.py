@@ -52,6 +52,7 @@ class SpeechRecognizer:
         self.microphone = sr.Microphone()
         self.audio_queue = queue.Queue()
         self.is_listening = False
+        self.has_printed_listening = False
         
         # Adjust for ambient noise
         with self.microphone as source:
@@ -60,6 +61,7 @@ class SpeechRecognizer:
     def start_listening(self):
         """Start listening for speech in a background thread"""
         self.is_listening = True
+        self.has_printed_listening = False  # Reset so "listening" prints when we start
         threading.Thread(target=self._listen_loop, daemon=True).start()
     
     def stop_listening(self):
@@ -71,7 +73,9 @@ class SpeechRecognizer:
         while self.is_listening:
             try:
                 with self.microphone as source:
-                    print("🎤 Listening... (speak now)")
+                    if not self.has_printed_listening:
+                        print("🎤 Listening... (speak now)")
+                        self.has_printed_listening = True
                     audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=10)
                     self.audio_queue.put(audio)
             except sr.WaitTimeoutError:
@@ -86,14 +90,17 @@ class SpeechRecognizer:
             audio = self.audio_queue.get_nowait()
             text = self.recognizer.recognize_google(audio)
             print(f"🎤 Heard: {text}")
+            self.has_printed_listening = False  # Reset so "listening" prints again for next utterance
             return text
         except queue.Empty:
             return None
         except sr.UnknownValueError:
             print("🎤 Could not understand audio")
+            self.has_printed_listening = False  # Reset even on error so we can try again
             return None
         except sr.RequestError as e:
             print(f"🎤 Speech recognition error: {e}")
+            self.has_printed_listening = False  # Reset even on error so we can try again
             return None
 
 # =============== Text-to-Speech ===============
