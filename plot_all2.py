@@ -268,6 +268,8 @@ def index():
                 padding: 10px;
                 z-index: 1000;
                 text-align: center;
+                font-family: monospace;
+                font-size: 14px;
             }
             #video-window h2 {
                 margin: 0 0 8px 0;
@@ -740,7 +742,7 @@ async def webrtc_lidar_and_lowstate():
                     }
                     socketio.emit("lowstate_data", lowstate_dict)
                     # print(f"lowstate_data: {lowstate_dict}");
-                    display_data(current_message)
+                    # display_data(current_message)
 
                 except Exception as e:
                     logging.error(f"Error in LowState callback: {e}")
