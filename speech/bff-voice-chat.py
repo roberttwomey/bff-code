@@ -727,6 +727,26 @@ def play_audio(audio_path: Path, interrupt_event: threading.Event, interruptable
     return True
 
 
+def is_reset_command(text: str) -> bool:
+    """Check if the transcribed text is a command to reset the conversation."""
+    text_lower = text.lower().strip()
+    reset_phrases = [
+        "start over",
+        "lets start over",
+        "let's start over",
+        "let us start over",
+        "reset",
+        "clear",
+        "new conversation",
+        "begin again",
+        "start fresh",
+        "restart",
+        "forget everything",
+        "forget that",
+    ]
+    return any(phrase in text_lower for phrase in reset_phrases)
+
+
 def build_initial_messages(system_prompt: str) -> list[dict[str, str]]:
     return [{"role": "system", "content": system_prompt}]
 
@@ -816,6 +836,31 @@ def run_conversation(config: ConversationConfig) -> None:
                 user_text = transcribe_audio(whisper_model, raw_audio, config.show_levels)
                 if not user_text:
                     print("Did not catch that. Let's try again.")
+                    continue
+
+                # Check for reset command
+                if is_reset_command(user_text):
+                    messages = build_initial_messages(config.system_prompt)
+                    print("Conversation reset. Starting fresh.", file=sys.stderr)
+                    append_log_line(
+                        log_file,
+                        {
+                            "type": "reset",
+                            "session_id": session_id,
+                            "turn": turn,
+                            "text": user_text,
+                            "audio_path": str(raw_audio),
+                        },
+                    )
+                    # Synthesize and play reset confirmation message
+                    reset_audio = tmpdir_path / f"turn-{turn:03d}-reset.wav"
+                    synthesize_with_piper(
+                        piper_voice,
+                        "Ok, starting over",
+                        reset_audio,
+                    )
+                    play_audio(reset_audio, playback_interrupt, interruptable=config.interruptable)
+                    turn += 1
                     continue
 
                 messages.append({"role": "user", "content": user_text})
