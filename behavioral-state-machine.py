@@ -5,8 +5,8 @@ import asyncio
 import enum
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_, unitree_go_msg_dds__LowState_
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_, UwbState_
+from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_, unitree_go_msg_dds__LowState_, unitree_go_msg_dds__UwbState_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
 from unitree_sdk2py.go2.sport.sport_client import SportClient
@@ -86,17 +86,23 @@ class BehavioralStateMachine:
         
         # State management
         self.current_state = RobotState.POWER_OFF  # None indicates no state has been set yet
-        self.last_activity_time = time.time()
-        self.idle_timeout = 30  # seconds
+        self.last_controller_activity_time = time.time()
+        self.last_uwb_activity_time = time.time()
+        self.idle_timeout = 45  # seconds
         self.monitoring = True
         
         # Wireless controller state
         self.controller_active = False
+        self.uwb_active = False
         self.last_controller_data = None
         
         # Subscribe to low state for controller input
         self.lowstate_subscriber = ChannelSubscriber("rt/lf/lowstate", LowState_)
         self.lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
+        
+        # Subscribe to UWB state for UWB controller input
+        self.uwb_subscriber = ChannelSubscriber("rt/uwbstate", UwbState_)
+        self.uwb_subscriber.Init(self.UwbStateMessageHandler, 10)
         
     def InitLowCmd(self):
         """Initialize LowCmd with required header and motor values"""
@@ -143,14 +149,39 @@ class BehavioralStateMachine:
                 )
                 
                 if self.controller_active:
-                    if time.time() - self.last_activity_time > 1:
+                    if time.time() - self.last_controller_activity_time > 1:
                         print(f"Controller activity detected - Joysticks: Lx={lx:.2f}, Rx={rx:.2f}, Ry={ry:.2f}, Ly={ly:.2f}")
-                    self.last_activity_time = time.time()
+                    self.last_controller_activity_time = time.time()
                     
         except Exception as e:
             print(f"Error checking controller activity: {e}")
     
-    def set_vui_color(self, color, duration=5):
+    def UwbStateMessageHandler(self, msg: UwbState_):
+        """Handle incoming UWB state messages, including joystick data"""
+        try:
+            # Get joystick values from UWB state
+            joystick = msg.joystick if hasattr(msg, 'joystick') else [0.0, 0.0]
+            buttons = msg.buttons if hasattr(msg, 'buttons') else 0
+            
+            # Check if joystick is being moved or buttons are pressed
+            # Joystick is a list/array with [x, y] values
+            jx = joystick[0] if len(joystick) > 0 else 0.0
+            jy = joystick[1] if len(joystick) > 1 else 0.0
+            
+            # Determine if UWB controller is active
+            self.uwb_active = (
+                abs(jx) > 0.01 or abs(jy) > 0.01 or buttons != 0
+            )
+            
+            if self.uwb_active:
+                if time.time() - self.last_uwb_activity_time > 1:
+                    print(f"UWB controller activity detected - Joystick: X={jx:.2f}, Y={jy:.2f}, Buttons={buttons}")
+                self.last_uwb_activity_time = time.time()
+                
+        except Exception as e:
+            print(f"Error checking UWB controller activity: {e}")
+    
+    def set_vui_color(self, color, duration=0):
         """Set the VUI LED color"""
         p = {}
         p["color"] = color
@@ -202,7 +233,7 @@ class BehavioralStateMachine:
         }
         
         color = color_map.get(new_state, "green")
-        self.set_vui_color(color, duration=600)  # duration=0 for persistent
+        self.set_vui_color(color, duration=9999)  # duration=0 for persistent
     
     def stand_down(self):
         """Make robot stand down"""
@@ -303,7 +334,7 @@ class BehavioralStateMachine:
             return
         
         current_time = time.time()
-        idle_duration = current_time - self.last_activity_time
+        idle_duration = min(current_time - self.last_controller_activity_time, current_time - self.last_uwb_activity_time)
         
         # If in WALKING mode and idle for too long, transition to DREAMING
         if self.current_state == RobotState.WALKING_MODE and idle_duration >= self.idle_timeout:
@@ -317,7 +348,7 @@ class BehavioralStateMachine:
     
     def check_wake_from_dreaming(self):
         """Check if controller activity should wake from DREAMING to WALKING"""
-        if self.current_state == RobotState.DREAMING_MODE and self.controller_active:
+        if self.current_state == RobotState.DREAMING_MODE and (self.controller_active or self.uwb_active):
             print("Controller activity detected while dreaming. Waking up to WALKING mode...")
             
             # Ensure MCF mode is active before standing
@@ -335,7 +366,8 @@ class BehavioralStateMachine:
             self.balance_stand()
             time.sleep(2)
 
-            self.last_activity_time = time.time()
+            self.last_controller_activity_time = time.time()
+            self.last_uwb_activity_time = time.time()
     
     def start(self):
         """Initialize the robot to WALKING mode"""
@@ -375,7 +407,8 @@ class BehavioralStateMachine:
                 self.check_wake_from_dreaming()
                 
                 # Display current state
-                idle_duration = time.time() - self.last_activity_time
+                idle_duration = min(time.time() - self.last_controller_activity_time, time.time() - self.last_uwb_activity_time)
+                # idle_duration = time.time() - self.last_ctivity_time
                 print(f"\rState: {self.current_state.value.upper():15} | Idle: {idle_duration:.1f}s", end="")
                 
                 time.sleep(0.5)
@@ -412,8 +445,8 @@ class BehavioralStateMachine:
 
 if __name__ == '__main__':
     print("WARNING: This script controls robot behavior and will power off the robot when Ctrl+C is pressed!")
-    print("Ensure there are no obstacles around the robot.")
-    input("Press Enter to continue...")
+    # print("Ensure there are no obstacles around the robot.")
+    # input("Press Enter to continue...")
     
     if len(sys.argv) > 1:
         ChannelFactoryInitialize(0, sys.argv[1])
