@@ -11,7 +11,26 @@ from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwi
 from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
 
-import unitree_legged_const as go2
+LegID = {
+    "FR_0": 0,  # Front right hip
+    "FR_1": 1,  # Front right thigh
+    "FR_2": 2,  # Front right calf
+    "FL_0": 3,
+    "FL_1": 4,
+    "FL_2": 5,
+    "RR_0": 6,
+    "RR_1": 7,
+    "RR_2": 8,
+    "RL_0": 9,
+    "RL_1": 10,
+    "RL_2": 11,
+}
+
+HIGHLEVEL = 0xEE
+LOWLEVEL = 0xFF
+TRIGERLEVEL = 0xF0
+PosStopF = 2.146e9
+VelStopF = 16000.0
 
 ethernet_interface = "enP8p1s0"
 
@@ -52,9 +71,9 @@ class Custom:
         # Initialize all motor commands to safe values
         for i in range(20):
             self.low_cmd.motor_cmd[i].mode = 0x01  # PMSM mode
-            self.low_cmd.motor_cmd[i].q = go2.PosStopF
+            self.low_cmd.motor_cmd[i].q = PosStopF
             self.low_cmd.motor_cmd[i].kp = 0
-            self.low_cmd.motor_cmd[i].dq = go2.VelStopF
+            self.low_cmd.motor_cmd[i].dq = VelStopF
             self.low_cmd.motor_cmd[i].kd = 0
             self.low_cmd.motor_cmd[i].tau = 0
         
@@ -208,7 +227,12 @@ if __name__ == '__main__':
         
         # Step 4: Execute system shutdown immediately
         print("Executing system shutdown now...")
-        subprocess.run(["shutdown", "-h", "now"], check=False)
+        # Try systemctl first (better for systemd systems), fallback to shutdown
+        result = subprocess.run(["systemctl", "poweroff"], check=False, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            # Fallback to shutdown command
+            subprocess.run(["shutdown", "-h", "now"], check=False)
         
         time.sleep(2)
         print("Commands sent successfully.")

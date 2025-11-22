@@ -347,11 +347,6 @@ def start_server(enable_robot_control: bool = True) -> None:
     """
     global _robot_controller
     
-    container_id = start_docker_container()
-    launch_webui_headless(container_id)
-    if not wait_for_api():
-        raise RuntimeError("Failed to start WebUI API server")
-    
     # Control robot state if enabled
     if enable_robot_control:
         try:
@@ -362,6 +357,11 @@ def start_server(enable_robot_control: bool = True) -> None:
             print(f"Warning: Could not control robot state: {e}")
             print("Continuing without robot control...")
 
+    container_id = start_docker_container()
+    launch_webui_headless(container_id)
+    if not wait_for_api():
+        raise RuntimeError("Failed to start WebUI API server")
+    
 
 def set_model(checkpoint: Optional[str] = None) -> None:
     """Switch to the specified model checkpoint."""
@@ -468,7 +468,7 @@ def generate_image(
     
     # Start blinking cyan light during synthesis
     if _robot_controller:
-        _robot_controller.start_blinking(blink_rate=0.5)
+        _robot_controller.start_blinking(blink_rate=1.0)
     
     try:
         r = requests.post(f"{SERVER}/sdapi/v1/txt2img", json=payload)
@@ -667,19 +667,21 @@ def stop_container(remove: bool = True) -> None:
         print(f"Container {_container_id} stopped (not removed).")
 
 
-def shutdown_server(remove_container: bool = True) -> None:
+def shutdown_server(remove_container: bool = True, enable_robot_control: bool = True) -> None:
     """Stop the WebUI server and optionally stop/remove the container."""
     global _container_id, _robot_controller
     
     print("Shutting down WebUI server...")
     
-    # Stop blinking if active
-    if _robot_controller:
+        # Control robot state if enabled
+    if enable_robot_control:
         try:
+            if _robot_controller is None:
+                _robot_controller = RobotController()
             _robot_controller.stop_blinking()
         except Exception as e:
             print(f"Warning: Error stopping robot blinking: {e}")
-    
+
     # Stop the webui process inside the container
     container_id = _container_id
     if container_id is None:
@@ -710,6 +712,38 @@ def shutdown_server(remove_container: bool = True) -> None:
     
     # Stop and optionally remove the container
     stop_container(remove=remove_container)
+
+
+    # Stand up and enter balanced stand mode
+    if _robot_controller:
+
+        # start lidar
+        _robot_controller.set_lidar_state("ON")
+        print("Lidar started")
+        time.sleep(2)
+
+        print("Standing up...")
+        try:
+            _robot_controller.sport_client.StandUp()
+            print("StandUp command sent")
+            time.sleep(2)
+        except Exception as e:
+            print(f"Error in StandUp: {e}")
+        
+        print("Entering balance stand...")
+        try:
+            _robot_controller.sport_client.BalanceStand()
+            print("BalanceStand command sent")
+            time.sleep(2)
+        except Exception as e:
+            print(f"Error in BalanceStand: {e}")
+
+
+        # set VUI to green
+        _robot_controller.set_vui_color("green")
+        print("VUI set to green")
+        time.sleep(2)
+    
 
 
 def is_server_running() -> bool:
