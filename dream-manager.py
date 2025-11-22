@@ -376,6 +376,25 @@ def set_model(checkpoint: Optional[str] = None) -> None:
     print(f"Model switched to: {checkpoint}")
 
 
+def ensure_robot_dreaming_state() -> None:
+    """
+    Ensure robot is in dreaming state before synthesis: lying down, lidar off, VUI cyan solid.
+    Initializes robot controller if needed.
+    """
+    global _robot_controller
+    
+    if not ROBOT_CONTROL_AVAILABLE:
+        return
+    
+    try:
+        if _robot_controller is None:
+            _robot_controller = RobotController()
+        _robot_controller.enter_dreaming_state()
+    except Exception as e:
+        print(f"Warning: Could not ensure robot dreaming state: {e}")
+        print("Continuing without robot control...")
+
+
 def generate_image(
     prompt: str,
     negative_prompt: Optional[str] = None,
@@ -443,6 +462,9 @@ def generate_image(
     # Add seed if provided
     if seed is not None:
         payload["seed"] = seed
+    
+    # Ensure robot is in dreaming state before synthesis (lying down, lidar off, cyan solid)
+    ensure_robot_dreaming_state()
     
     # Start blinking cyan light during synthesis
     if _robot_controller:
@@ -578,6 +600,9 @@ def generate_video(
     # Add seed if provided
     if seed is not None:
         payload["seed"] = seed
+    
+    # Ensure robot is in dreaming state before synthesis (lying down, lidar off, cyan solid)
+    ensure_robot_dreaming_state()
     
     # Start blinking cyan light during synthesis
     if _robot_controller:
