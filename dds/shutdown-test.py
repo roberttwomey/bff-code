@@ -1,7 +1,6 @@
 import time
 import sys
 import subprocess
-import argparse
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, BmsCmd_
@@ -156,23 +155,12 @@ class Custom:
 
 if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser(description='Robot shutdown script')
-    parser.add_argument('interface', nargs='?', default=None,
-                        help='Ethernet interface name (default: enP8p1s0)')
-    parser.add_argument('--yes', action='store_true',
-                        help='Required flag to actually execute BMS power off command')
-    
-    args = parser.parse_args()
-
     print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
     print("This will release MFC mode, make the robot stand down, and send a power off command!")
-    if not args.yes:
-        print("\nWARNING: --yes flag not provided. BMS power off command will NOT be executed.")
-        print("Add --yes to the command line to actually power off the robot.")
     input("Press Enter to continue...")
 
-    if args.interface:
-        ChannelFactoryInitialize(0, args.interface)
+    if len(sys.argv)>1:
+        ChannelFactoryInitialize(0, sys.argv[1])
     else:
         ChannelFactoryInitialize(0, ethernet_interface)
 
@@ -204,18 +192,15 @@ if __name__ == '__main__':
     # custom.balance_stand()
     # time.sleep(2)
 
-    # Step 3: Send the BMS off command (only if --yes flag is provided)
-    if args.yes:
-        custom.send_bms_off_command()
-        
-        # Step 4: Execute system shutdown immediately
-        print("Executing system shutdown now...")
-        subprocess.run(["shutdown", "-h", "now"], check=False)
-        
-        time.sleep(2)
-        print("Commands sent successfully.")
-    else:
-        print("\nSkipping BMS power off command (--yes flag not provided).")
-        print("Robot has been put in safe state (stand down and MFC mode released).")
+    # Step 3: Send the BMS off command
+    custom.send_bms_off_command()
+    
+    # Step 4: Execute system shutdown immediately
+    print("Executing system shutdown now...")
+    subprocess.run(["shutdown", "-h", "now"], check=False)
+    
+    time.sleep(2)
+
+    print("Commands sent successfully.")
 
 
