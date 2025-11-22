@@ -27,7 +27,7 @@ if __name__ == "__main__":
     # Check if ethernet interface is active first
     interface_name = "enP8p1s0"
     if not is_interface_active(interface_name):
-        print("not connected")
+        print(f"not connected: interface {interface_name} is not active")
         exit(0)
     
     # Initialize channel factory
@@ -47,6 +47,6 @@ if __name__ == "__main__":
     
     # Check connection status
     if message_received:
-        print("connected")
+        print(f"connected: message received on interface {interface_name}")
     else:
-        print("not connected")
+        print(f"not connected: message not received on interface {interface_name}")
