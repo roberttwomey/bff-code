@@ -1,0 +1,2 @@
+-[ ] add a web server display that shows the current dreams (if in idle mode), current camera view, transcript of conversation (if in chat mode)
+-[ ] add a configuration script on first run that walks the user through connecting to local wifi, connecting to bluetooth headset, and beginning behavioral program
