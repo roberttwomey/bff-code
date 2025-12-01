@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import queue
+import subprocess
 import sys
 import tempfile
 import threading
@@ -85,6 +86,8 @@ DEFAULT_BLOCK_DURATION = float(os.environ.get("BFF_BLOCK_DURATION", "0.2"))
 DEFAULT_INTERRUPTABLE_ENV = os.environ.get("BFF_INTERRUPTABLE", "true").lower()
 DEFAULT_INTERRUPTABLE = DEFAULT_INTERRUPTABLE_ENV in ("true", "1", "yes", "on")
 LOG_ROOT = Path(os.environ.get("BFF_LOG_ROOT", Path.home() / "bff" / "logs")).expanduser()
+LAST_HEADSET_MAC = os.environ.get("LAST_HEADSET_MAC")
+LAST_HEADSET_NAME = os.environ.get("LAST_HEADSET_NAME")
 
 
 @dataclass
@@ -106,7 +109,7 @@ class ConversationConfig:
     silence_duration: float = DEFAULT_SILENCE_DURATION
     min_phrase_seconds: float = DEFAULT_MIN_PHRASE_SECONDS
     block_duration: float = DEFAULT_BLOCK_DURATION
-    show_levels: bool = False
+    show_levels: bool = True
     input_device_keyword: str | None = DEFAULT_INPUT_DEVICE_KEYWORD
     input_device_index: int | None = None
     interruptable: bool = DEFAULT_INTERRUPTABLE
@@ -194,7 +197,14 @@ def parse_args() -> ConversationConfig:
     parser.add_argument(
         "--show-levels",
         action="store_true",
-        help="Print live RMS level meter to stderr",
+        default=True,
+        help="Print live RMS level meter to stderr (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-show-levels",
+        dest="show_levels",
+        action="store_false",
+        help="Disable live RMS level meter",
     )
     parser.add_argument(
         "--input-device-keyword",
@@ -342,6 +352,247 @@ def meter_break(show_levels: bool) -> None:
     if show_levels:
         sys.stderr.write("\n") #\n
         sys.stderr.flush()
+
+
+def try_auto_connect_headset(mac: str, name: str) -> bool:
+    """Attempt to auto-connect to a saved headset."""
+    if not mac or not name:
+        return False
+    
+    print(f"Attempting to auto-connect to last headset: {name} ({mac})", file=sys.stderr)
+    
+    try:
+        # Initialize Bluetooth
+        subprocess.run(["bluetoothctl", "power", "on"], capture_output=True, check=False)
+        subprocess.run(["bluetoothctl", "agent", "on"], capture_output=True, check=False)
+        subprocess.run(["bluetoothctl", "default-agent"], capture_output=True, check=False)
+        
+        # Trust and connect
+        bluetoothctl_input = f"trust {mac}\nconnect {mac}\n"
+        result = subprocess.run(
+            ["bluetoothctl"],
+            input=bluetoothctl_input.encode(),
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        
+        # Wait for connection to establish
+        time.sleep(3)
+        
+        # Check if connection was successful by looking for the card in PulseAudio
+        pactl_result = subprocess.run(
+            ["pactl", "list", "cards", "short"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        
+        for line in pactl_result.stdout.splitlines():
+            if mac.lower() in line.lower():
+                card_id = line.split()[0]
+                subprocess.run(
+                    ["pactl", "set-card-profile", card_id, "headset-head-unit"],
+                    capture_output=True,
+                    check=False,
+                )
+                print(f"Auto-connect successful! Connected {name} ({mac}) in headset (HFP/HSP) mode.", file=sys.stderr)
+                return True
+        
+        print("Auto-connect failed. Device not found or not available.", file=sys.stderr)
+        return False
+    except Exception as exc:
+        print(f"Auto-connect error: {exc}", file=sys.stderr)
+        return False
+
+
+def scan_bluetooth_devices() -> list[tuple[str, str]]:
+    """Scan for Bluetooth devices and return list of (mac, name) tuples."""
+    devices: list[tuple[str, str]] = []
+    
+    try:
+        # Initialize Bluetooth
+        subprocess.run(["bluetoothctl", "power", "on"], capture_output=True, check=False)
+        subprocess.run(["bluetoothctl", "agent", "on"], capture_output=True, check=False)
+        subprocess.run(["bluetoothctl", "default-agent"], capture_output=True, check=False)
+        
+        # Start scanning
+        scan_process = subprocess.Popen(
+            ["bluetoothctl", "scan", "on"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        
+        # Wait for devices to be discovered
+        time.sleep(5)
+        
+        # Stop scanning
+        scan_process.terminate()
+        subprocess.run(["bluetoothctl", "scan", "off"], capture_output=True, check=False)
+        
+        # Get list of devices
+        result = subprocess.run(
+            ["bluetoothctl", "devices"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        
+        # Filter for audio devices first
+        audio_devices = []
+        all_devices = []
+        
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(None, 2)
+            if len(parts) >= 3:
+                mac = parts[1]
+                name = parts[2]
+                device_tuple = (mac, name)
+                all_devices.append(device_tuple)
+                # Check if it's an audio device
+                name_lower = name.lower()
+                if any(keyword in name_lower for keyword in ["headset", "audio", "speaker", "earbuds", "airpods"]):
+                    audio_devices.append(device_tuple)
+        
+        # Return audio devices if found, otherwise all devices
+        return audio_devices if audio_devices else all_devices
+    except Exception as exc:
+        print(f"Bluetooth scan error: {exc}", file=sys.stderr)
+        return []
+
+
+def connect_to_headset(mac: str, name: str) -> bool:
+    """Connect to a specific Bluetooth headset."""
+    try:
+        print(f"Connecting to: {name} ({mac})", file=sys.stderr)
+        
+        # Trust and connect
+        bluetoothctl_input = f"trust {mac}\nconnect {mac}\n"
+        subprocess.run(
+            ["bluetoothctl"],
+            input=bluetoothctl_input.encode(),
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        
+        # Wait for connection to establish
+        time.sleep(2)
+        
+        # Set headset profile
+        pactl_result = subprocess.run(
+            ["pactl", "list", "cards", "short"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        
+        for line in pactl_result.stdout.splitlines():
+            if mac.lower() in line.lower():
+                card_id = line.split()[0]
+                subprocess.run(
+                    ["pactl", "set-card-profile", card_id, "headset-head-unit"],
+                    capture_output=True,
+                    check=False,
+                )
+                print(f"Connected {name} ({mac}) in headset (HFP/HSP) mode.", file=sys.stderr)
+                
+                # Save to environment (will be saved to .env by caller)
+                os.environ["LAST_HEADSET_MAC"] = mac
+                os.environ["LAST_HEADSET_NAME"] = name
+                return True
+        
+        print(f"Connected to {name} ({mac}), but card not found in PulseAudio yet.", file=sys.stderr)
+        print("The device may need a moment to fully initialize.", file=sys.stderr)
+        os.environ["LAST_HEADSET_MAC"] = mac
+        os.environ["LAST_HEADSET_NAME"] = name
+        return True
+    except Exception as exc:
+        print(f"Connection error: {exc}", file=sys.stderr)
+        return False
+
+
+def ensure_headset_connected() -> None:
+    """Ensure a Bluetooth headset is connected, auto-connecting or prompting user if needed."""
+    # Try auto-connect first
+    if LAST_HEADSET_MAC and LAST_HEADSET_NAME:
+        if try_auto_connect_headset(LAST_HEADSET_MAC, LAST_HEADSET_NAME):
+            return
+        print("", file=sys.stderr)
+    
+    # Scan for devices
+    print("Scanning for Bluetooth devices...", file=sys.stderr)
+    devices = scan_bluetooth_devices()
+    
+    if not devices:
+        print("No Bluetooth devices found.", file=sys.stderr)
+        return
+    
+    # Display menu
+    print("", file=sys.stderr)
+    print("Available Bluetooth devices:", file=sys.stderr)
+    print("=" * 28, file=sys.stderr)
+    for idx, (mac, name) in enumerate(devices, 1):
+        print(f"{idx}) {name} ({mac})", file=sys.stderr)
+    
+    # Get user selection
+    print("", file=sys.stderr)
+    try:
+        selection = input("Select a device (1-{}) or 'q' to quit: ".format(len(devices)))
+        if selection.lower() == 'q':
+            print("Cancelled.", file=sys.stderr)
+            return
+        
+        idx = int(selection)
+        if idx < 1 or idx > len(devices):
+            print("Invalid selection.", file=sys.stderr)
+            return
+        
+        mac, name = devices[idx - 1]
+        if connect_to_headset(mac, name):
+            # Save to .env file (look for it in current dir or parent dirs, like dotenv does)
+            env_path = None
+            current = Path.cwd()
+            for parent in [current] + list(current.parents):
+                candidate = parent / ".env"
+                if candidate.exists():
+                    env_path = candidate
+                    break
+            
+            # If not found, use .env in current directory
+            if env_path is None:
+                env_path = Path(".env")
+            
+            # Read existing .env or create new content
+            if env_path.exists():
+                with open(env_path, "r") as f:
+                    content = f.read()
+                lines = content.splitlines()
+            else:
+                lines = []
+            
+            # Update or add headset info
+            updated_mac = False
+            updated_name = False
+            for i, line in enumerate(lines):
+                if line.startswith("LAST_HEADSET_MAC="):
+                    lines[i] = f'LAST_HEADSET_MAC={mac}'
+                    updated_mac = True
+                elif line.startswith("LAST_HEADSET_NAME="):
+                    lines[i] = f'LAST_HEADSET_NAME="{name}"'
+                    updated_name = True
+            
+            if not updated_mac:
+                lines.append(f"LAST_HEADSET_MAC={mac}")
+            if not updated_name:
+                lines.append(f'LAST_HEADSET_NAME="{name}"')
+            
+            with open(env_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+    except (ValueError, KeyboardInterrupt, EOFError):
+        print("Cancelled or invalid input.", file=sys.stderr)
 
 
 def find_input_device(keyword: str, min_channels: int = 1) -> int | None:
@@ -783,6 +1034,18 @@ def run_conversation(config: ConversationConfig) -> None:
             },
         },
     )
+
+    # Ensure Bluetooth headset is connected
+    ensure_headset_connected()
+    # Reload environment variables in case headset info was updated
+    dotenv.load_dotenv(override=True)
+    # Update module-level variables after reload
+    global LAST_HEADSET_MAC, LAST_HEADSET_NAME
+    LAST_HEADSET_MAC = os.environ.get("LAST_HEADSET_MAC")
+    LAST_HEADSET_NAME = os.environ.get("LAST_HEADSET_NAME")
+    # Update the input device keyword if we have a saved headset name
+    if LAST_HEADSET_NAME and not config.input_device_keyword:
+        config.input_device_keyword = LAST_HEADSET_NAME
 
     if config.input_device_keyword:
         device_index = find_input_device(config.input_device_keyword)
