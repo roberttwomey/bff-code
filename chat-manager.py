@@ -776,7 +776,16 @@ def transcribe_audio(model: whisper.Whisper, audio_path: Path, show_levels: bool
     meter_break(show_levels)
     print("Transcribing with Whisper…", file=sys.stderr)
     start_time = time.perf_counter()
-    result = model.transcribe(str(audio_path), fp16=False)
+    # Optimize for speed: use fp16 if CUDA available, beam_size=1 for faster decoding
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_fp16 = device == "cuda"
+    result = model.transcribe(
+        str(audio_path),
+        fp16=use_fp16,
+        beam_size=1,  # Faster decoding (default is 5)
+        best_of=1,    # Don't try multiple candidates
+        temperature=0,  # Deterministic, faster
+    )
     end_time = time.perf_counter()
     duration = end_time - start_time
     # print(f"Whisper transcription completed in {duration:.2f} seconds", file=sys.stderr)
@@ -860,10 +869,30 @@ def query_ollama(
         return ""
 
     try:
-        stream = client.chat(model=model_name, messages=messages, stream=True)
+        # Optimize for speed: use faster generation parameters
+        stream = client.chat(
+            model=model_name,
+            messages=messages,
+            stream=True,
+            options={
+                "temperature": 0.7,  # Lower = faster, more deterministic
+                "top_p": 0.9,        # Nucleus sampling for faster generation
+                "top_k": 40,         # Limit vocabulary search
+                "num_predict": 100,  # Limit response length (adjust as needed)
+            },
+        )
     except TypeError:
         # Fallback: streaming not supported; blocking call (no interruption)
-        response = client.chat(model=model_name, messages=messages)
+        response = client.chat(
+            model=model_name,
+            messages=messages,
+            options={
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 40,
+                "num_predict": 100,
+            },
+        )
         end_time = time.perf_counter()
         duration = end_time - start_time
         # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
@@ -917,7 +946,16 @@ def query_ollama(
             return None
 
         # Streaming yielded no text; fallback to blocking call
-        response = client.chat(model=model_name, messages=messages)
+        response = client.chat(
+            model=model_name,
+            messages=messages,
+            options={
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "top_k": 40,
+                "num_predict": 100,
+            },
+        )
         end_time = time.perf_counter()
         duration = end_time - start_time
         # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
@@ -1023,6 +1061,166 @@ def synthesize_with_piper(
             if maybe_rate and maybe_rate != base_sample_rate:
                 wav_file.setframerate(maybe_rate)
             wav_file.writeframes(data)
+
+
+def synthesize_and_play_piper_streaming(
+    voice: PiperVoice,
+    text: str,
+    interrupt_event: threading.Event,
+    interruptable: bool = True,
+) -> bool:
+    """Synthesize and play Piper TTS audio in a streaming fashion for lower latency."""
+    print("Synthesizing speech with Piper (streaming)…", file=sys.stderr)
+    audio_iter = voice.synthesize(text)
+    base_sample_rate = int(
+        getattr(voice, "sample_rate", getattr(getattr(voice, "config", {}), "sample_rate", DEFAULT_SAMPLE_RATE))
+    )
+
+    def extract_audio_field(obj: Any) -> Any | None:
+        field_candidates = (
+            "audio",
+            "_audio",
+            "buffer",
+            "data",
+            "pcm",
+            "samples",
+            "wave",
+            "waveform",
+            "frames",
+            "chunk",
+            "audio_int16_bytes",
+            "audio_int16_array",
+            "audio_float_array",
+            "_audio_int16_bytes",
+            "_audio_int16_array",
+        )
+        for attr in field_candidates:
+            value = getattr(obj, attr, None)
+            if value is not None:
+                return value
+        return None
+
+    def to_numpy_array(chunk: Any) -> tuple[np.ndarray, int | None]:
+        """Convert chunk to numpy float32 array for playback."""
+        current_rate: int | None = None
+        data: Any = chunk
+
+        if AudioChunk is not None and isinstance(chunk, AudioChunk):
+            maybe = extract_audio_field(chunk)
+            if maybe is not None:
+                data = maybe
+            current_rate = getattr(chunk, "sample_rate", None)
+        elif isinstance(chunk, dict):
+            if "audio" in chunk:
+                data = chunk["audio"]
+            else:
+                for key in ("buffer", "data", "pcm", "samples"):
+                    if key in chunk:
+                        data = chunk[key]
+                        break
+            current_rate = chunk.get("sample_rate")
+        else:
+            maybe = extract_audio_field(chunk)
+            if maybe is not None:
+                data = maybe
+                current_rate = getattr(chunk, "sample_rate", None)
+
+        # Convert to float32 numpy array
+        if isinstance(data, np.ndarray):
+            if data.dtype == np.int16:
+                # Convert int16 to float32 in range [-1.0, 1.0]
+                return (data.astype(np.float32) / 32768.0), current_rate
+            elif data.dtype != np.float32:
+                return data.astype(np.float32), current_rate
+            return data, current_rate
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            # Assume int16 PCM
+            arr = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+            return arr, current_rate
+        if isinstance(data, (tuple, list)) and data:
+            first = data[0]
+            if isinstance(first, np.ndarray):
+                if first.dtype == np.int16:
+                    return (first.astype(np.float32) / 32768.0), current_rate
+                return first.astype(np.float32), current_rate
+            if isinstance(first, (bytes, bytearray, memoryview)):
+                arr = np.frombuffer(first, dtype=np.int16).astype(np.float32) / 32768.0
+                return arr, current_rate
+
+        # Fallback: try to convert to numpy array
+        try:
+            arr = np.array(data, dtype=np.float32)
+            return arr, current_rate
+        except Exception as exc:
+            raise TypeError(
+                f"Unsupported Piper chunk type for streaming: {type(chunk)!r}"
+            ) from exc
+
+    interrupt_event.clear()
+    sample_rate_ref = [base_sample_rate]  # Use list for mutable reference
+    buffer_queue: queue.Queue[np.ndarray] = queue.Queue()
+    buffer_filled = threading.Event()
+    playback_done = threading.Event()
+    error_occurred = threading.Event()
+
+    def producer():
+        """Produce audio chunks and add to buffer."""
+        try:
+            for chunk in audio_iter:
+                if interruptable and interrupt_event.is_set():
+                    break
+                audio_array, maybe_rate = to_numpy_array(chunk)
+                if maybe_rate:
+                    sample_rate_ref[0] = maybe_rate
+                # Ensure 2D array (samples, channels)
+                if audio_array.ndim == 1:
+                    audio_array = audio_array[:, np.newaxis]
+                buffer_queue.put(audio_array)
+                buffer_filled.set()
+            buffer_queue.put(None)  # Sentinel to signal end
+        except Exception as exc:
+            print(f"TTS synthesis error: {exc}", file=sys.stderr)
+            error_occurred.set()
+            buffer_queue.put(None)
+
+    producer_thread = threading.Thread(target=producer, daemon=True)
+    producer_thread.start()
+
+    # Wait for first chunk before starting playback
+    buffer_filled.wait(timeout=5.0)
+    if error_occurred.is_set():
+        return False
+
+    block_size = max(1024, sample_rate_ref[0] // 10)
+    with sd.OutputStream(
+        samplerate=sample_rate_ref[0],
+        channels=1,
+        dtype="float32",
+        blocksize=block_size,
+    ) as stream:
+        while True:
+            if interruptable and interrupt_event.is_set():
+                stream.abort()
+                stream.stop()
+                return False
+
+            try:
+                chunk = buffer_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if chunk is None:  # Sentinel - end of stream
+                break
+
+            if interruptable and interrupt_event.is_set():
+                stream.abort()
+                stream.stop()
+                return False
+
+            stream.write(chunk)
+
+    producer_thread.join(timeout=1.0)
+    return True
 
 
 def play_audio(audio_path: Path, interrupt_event: threading.Event, interruptable: bool = True) -> bool:
@@ -1289,13 +1487,20 @@ def run_conversation(config: ConversationConfig) -> None:
 
             messages.append({"role": "assistant", "content": assistant_text})
 
+            # Use streaming TTS for lower latency (synthesize and play simultaneously)
+            played = synthesize_and_play_piper_streaming(
+                piper_voice,
+                assistant_text,
+                playback_interrupt,
+                interruptable=config.interruptable,
+            )
+            # Still save audio for logging (synthesize separately)
             response_audio = session_dir / f"turn-{turn:03d}-response.wav"
             synthesize_with_piper(
                 piper_voice,
                 assistant_text,
                 response_audio,
             )
-            played = play_audio(response_audio, playback_interrupt, interruptable=config.interruptable)
             if not played:
                 # Interrupted during playback: rollback assistant AND user message, save user text
                 if messages and messages[-1]["role"] == "assistant":
