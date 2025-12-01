@@ -774,7 +774,7 @@ def phrase_stream(
 
 def transcribe_audio(model: whisper.Whisper, audio_path: Path, show_levels: bool) -> str:
     meter_break(show_levels)
-    # print("Transcribing with Whisper…", file=sys.stderr)
+    print("Transcribing with Whisper…", file=sys.stderr)
     start_time = time.perf_counter()
     result = model.transcribe(str(audio_path), fp16=False)
     end_time = time.perf_counter()
@@ -812,13 +812,13 @@ def query_ollama(
             snippet += "…"
         break
 
-    # if snippet:
-    #     print(
-    #         f"Querying Ollama model '{model_name}' with \"{snippet}\"…",
-    #         file=sys.stderr,
-    #     )
-    # else:
-    #     print(f"Querying Ollama model '{model_name}'…", file=sys.stderr)
+    if snippet:
+        print(
+            f"Querying Ollama model '{model_name}' with \"{snippet}\"…",
+            file=sys.stderr,
+        )
+    else:
+        print(f"Querying Ollama model '{model_name}'…", file=sys.stderr)
     client = ollama.Client()
     start_time = time.perf_counter()
 
@@ -932,7 +932,7 @@ def query_ollama(
 def synthesize_with_piper(
     voice: PiperVoice, text: str, output_wav: Path
 ) -> None:
-    # print("Synthesizing speech with Piper…", file=sys.stderr)
+    print("Synthesizing speech with Piper…", file=sys.stderr)
     audio_iter = voice.synthesize(text)
     base_sample_rate = int(
         getattr(voice, "sample_rate", getattr(getattr(voice, "config", {}), "sample_rate", DEFAULT_SAMPLE_RATE))
