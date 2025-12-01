@@ -1091,9 +1091,14 @@ def run_conversation(config: ConversationConfig) -> None:
         noise_w=config.piper_noise_w,
     )
 
+    # Create session directory
     log_dir = ensure_log_dir()
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_file = log_dir / f"voice-session-{session_id}.jsonl"
+    session_dir = log_dir / f"session-{session_id}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    
+    log_file = session_dir / "session.jsonl"
+    
     append_log_line(
         log_file,
         {
@@ -1193,134 +1198,133 @@ def run_conversation(config: ConversationConfig) -> None:
     producer_thread = threading.Thread(target=producer, daemon=True)
     producer_thread.start()
 
-    with tempfile.TemporaryDirectory(prefix="bff-voice-chat-") as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        try:
-            turn = 1
-            while True:
-                try:
-                    if pending_segments:
-                        phrase = pending_segments.pop(0)
-                    else:
-                        phrase = segment_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
+    # Use the session directory for audio files instead of a temp dir
+    try:
+        turn = 1
+        while True:
+            try:
+                if pending_segments:
+                    phrase = pending_segments.pop(0)
+                else:
+                    phrase = segment_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-                raw_audio = tmpdir_path / f"turn-{turn:03d}-input.wav"
-                sf.write(raw_audio, phrase, config.sample_rate)
+            raw_audio = session_dir / f"turn-{turn:03d}-input.wav"
+            sf.write(raw_audio, phrase, config.sample_rate)
 
-                user_text = transcribe_audio(whisper_model, raw_audio, config.show_levels)
-                if not user_text:
-                    print("Did not catch that. Let's try again.")
-                    continue
+            user_text = transcribe_audio(whisper_model, raw_audio, config.show_levels)
+            if not user_text:
+                print("Did not catch that. Let's try again.")
+                continue
 
-                if pending_concatenation:
-                    print(f"Concatenating previous input: '{pending_concatenation}' + '{user_text}'", file=sys.stderr)
-                    user_text = f"{pending_concatenation} {user_text}"
-                    pending_concatenation = ""
+            if pending_concatenation:
+                print(f"Concatenating previous input: '{pending_concatenation}' + '{user_text}'", file=sys.stderr)
+                user_text = f"{pending_concatenation} {user_text}"
+                pending_concatenation = ""
 
-                # Check for reset command
-                if is_reset_command(user_text):
-                    messages = build_initial_messages(config.system_prompt)
-                    print("Conversation reset. Starting fresh.", file=sys.stderr)
-                    append_log_line(
-                        log_file,
-                        {
-                            "type": "reset",
-                            "session_id": session_id,
-                            "turn": turn,
-                            "text": user_text,
-                            "audio_path": str(raw_audio),
-                        },
-                    )
-                    # Synthesize and play reset confirmation message
-                    reset_audio = tmpdir_path / f"turn-{turn:03d}-reset.wav"
-                    synthesize_with_piper(
-                        piper_voice,
-                        "Ok, starting over",
-                        reset_audio,
-                    )
-                    play_audio(reset_audio, playback_interrupt, interruptable=config.interruptable)
-                    turn += 1
-                    continue
-
-                messages.append({"role": "user", "content": user_text})
+            # Check for reset command
+            if is_reset_command(user_text):
+                messages = build_initial_messages(config.system_prompt)
+                print("Conversation reset. Starting fresh.", file=sys.stderr)
                 append_log_line(
                     log_file,
                     {
-                        "type": "user",
+                        "type": "reset",
                         "session_id": session_id,
                         "turn": turn,
                         "text": user_text,
                         "audio_path": str(raw_audio),
                     },
                 )
-
-                abort_event = threading.Event()
-                assistant_text = query_ollama(
-                    config.ollama_model,
-                    messages,
-                    segment_queue=segment_queue,
-                    pending_segments=pending_segments,
-                    abort_event=abort_event,
-                    playback_interrupt=playback_interrupt,
-                    show_levels=config.show_levels,
-                    interruptable=config.interruptable,
-                )
-                if not assistant_text:
-                    append_log_line(
-                        log_file,
-                        {
-                            "type": "assistant_cancelled",
-                            "session_id": session_id,
-                            "turn": turn,
-                        },
-                    )
-                    # Interrupted during generation: rollback user message and save for concatenation
-                    if messages and messages[-1]["role"] == "user":
-                        messages.pop()
-                    pending_concatenation = user_text
-                    turn += 1
-                    continue
-
-                messages.append({"role": "assistant", "content": assistant_text})
-
-                response_audio = tmpdir_path / f"turn-{turn:03d}-response.wav"
+                # Synthesize and play reset confirmation message
+                reset_audio = session_dir / f"turn-{turn:03d}-reset.wav"
                 synthesize_with_piper(
                     piper_voice,
-                    assistant_text,
-                    response_audio,
+                    "Ok, starting over",
+                    reset_audio,
                 )
-                played = play_audio(response_audio, playback_interrupt, interruptable=config.interruptable)
-                if not played:
-                    # Interrupted during playback: rollback assistant AND user message, save user text
-                    if messages and messages[-1]["role"] == "assistant":
-                        messages.pop()
-                    if messages and messages[-1]["role"] == "user":
-                        messages.pop()
-                    pending_concatenation = user_text
-                    
+                play_audio(reset_audio, playback_interrupt, interruptable=config.interruptable)
+                turn += 1
+                continue
+
+            messages.append({"role": "user", "content": user_text})
+            append_log_line(
+                log_file,
+                {
+                    "type": "user",
+                    "session_id": session_id,
+                    "turn": turn,
+                    "text": user_text,
+                    "audio_path": str(raw_audio),
+                },
+            )
+
+            abort_event = threading.Event()
+            assistant_text = query_ollama(
+                config.ollama_model,
+                messages,
+                segment_queue=segment_queue,
+                pending_segments=pending_segments,
+                abort_event=abort_event,
+                playback_interrupt=playback_interrupt,
+                show_levels=config.show_levels,
+                interruptable=config.interruptable,
+            )
+            if not assistant_text:
                 append_log_line(
                     log_file,
                     {
-                        "type": "assistant" if played else "assistant_audio_cancelled",
+                        "type": "assistant_cancelled",
                         "session_id": session_id,
                         "turn": turn,
-                        "text": assistant_text,
-                        "audio_path": str(response_audio),
                     },
                 )
-
+                # Interrupted during generation: rollback user message and save for concatenation
+                if messages and messages[-1]["role"] == "user":
+                    messages.pop()
+                pending_concatenation = user_text
                 turn += 1
-        except KeyboardInterrupt:
-            print("\nExiting conversation.")
-        finally:
-            stop_event.set()
-            producer_thread.join(timeout=1.0)
+                continue
+
+            messages.append({"role": "assistant", "content": assistant_text})
+
+            response_audio = session_dir / f"turn-{turn:03d}-response.wav"
+            synthesize_with_piper(
+                piper_voice,
+                assistant_text,
+                response_audio,
+            )
+            played = play_audio(response_audio, playback_interrupt, interruptable=config.interruptable)
+            if not played:
+                # Interrupted during playback: rollback assistant AND user message, save user text
+                if messages and messages[-1]["role"] == "assistant":
+                    messages.pop()
+                if messages and messages[-1]["role"] == "user":
+                    messages.pop()
+                pending_concatenation = user_text
+                
             append_log_line(
                 log_file,
-                {"type": "session_end", "session_id": session_id},
+                {
+                    "type": "assistant" if played else "assistant_audio_cancelled",
+                    "session_id": session_id,
+                    "turn": turn,
+                    "text": assistant_text,
+                    "audio_path": str(response_audio),
+                },
             )
+
+            turn += 1
+    except KeyboardInterrupt:
+        print("\nExiting conversation.")
+    finally:
+        stop_event.set()
+        producer_thread.join(timeout=1.0)
+        append_log_line(
+            log_file,
+            {"type": "session_end", "session_id": session_id},
+        )
 
 
 def main() -> None:
