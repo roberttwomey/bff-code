@@ -773,7 +773,6 @@ def phrase_stream(
 
 
 def transcribe_audio(model: whisper.Whisper, audio_path: Path, show_levels: bool) -> str:
-    meter_break(show_levels)
     print("Transcribing with Whisper…", file=sys.stderr)
     start_time = time.perf_counter()
     # Optimize for speed: use fp16 if CUDA available, beam_size=1 for faster decoding
@@ -806,7 +805,6 @@ def query_ollama(
     show_levels: bool,
     interruptable: bool = True,
 ) -> str | None:
-    meter_break(show_levels)
     snippet = ""
     for message in reversed(messages):
         if message.get("role") != "user":
