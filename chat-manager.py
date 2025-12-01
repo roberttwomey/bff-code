@@ -1179,6 +1179,7 @@ def run_conversation(config: ConversationConfig) -> None:
     segment_queue: queue.Queue[np.ndarray] = queue.Queue()
     pending_segments: list[np.ndarray] = []
     playback_interrupt = threading.Event()
+    pending_concatenation = ""
 
     def producer() -> None:
         try:
@@ -1212,6 +1213,11 @@ def run_conversation(config: ConversationConfig) -> None:
                 if not user_text:
                     print("Did not catch that. Let's try again.")
                     continue
+
+                if pending_concatenation:
+                    print(f"Concatenating previous input: '{pending_concatenation}' + '{user_text}'", file=sys.stderr)
+                    user_text = f"{pending_concatenation} {user_text}"
+                    pending_concatenation = ""
 
                 # Check for reset command
                 if is_reset_command(user_text):
@@ -1270,6 +1276,10 @@ def run_conversation(config: ConversationConfig) -> None:
                             "turn": turn,
                         },
                     )
+                    # Interrupted during generation: rollback user message and save for concatenation
+                    if messages and messages[-1]["role"] == "user":
+                        messages.pop()
+                    pending_concatenation = user_text
                     turn += 1
                     continue
 
@@ -1282,6 +1292,14 @@ def run_conversation(config: ConversationConfig) -> None:
                     response_audio,
                 )
                 played = play_audio(response_audio, playback_interrupt, interruptable=config.interruptable)
+                if not played:
+                    # Interrupted during playback: rollback assistant AND user message, save user text
+                    if messages and messages[-1]["role"] == "assistant":
+                        messages.pop()
+                    if messages and messages[-1]["role"] == "user":
+                        messages.pop()
+                    pending_concatenation = user_text
+                    
                 append_log_line(
                     log_file,
                     {
