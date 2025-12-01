@@ -62,7 +62,31 @@ except ImportError:  # pragma: no cover - older library versions
     AudioChunk = None
 
 
+
 dotenv.load_dotenv()
+
+def fix_user_paths() -> None:
+    """
+    If /home/cohab does not exist, replace /home/cohab prefixes in environment variables
+    with the current user's home directory.
+    """
+    # Check if we are likely on a different machine (i.e., /home/cohab missing)
+    # or just want to be safe and use the current user's home.
+    cohab_home = Path("/home/cohab")
+    if cohab_home.exists():
+        return
+
+    current_home = Path.home()
+    print(f"Notice: {cohab_home} not found. Remapping paths to {current_home}...", file=sys.stderr)
+
+    for key, value in os.environ.items():
+        if value and "/home/cohab" in value:
+            new_value = value.replace("/home/cohab", str(current_home))
+            os.environ[key] = new_value
+            # print(f"  Remapped {key}: {value} -> {new_value}", file=sys.stderr)
+
+fix_user_paths()
+
 
 DEFAULT_SYSTEM_PROMPT = (
     os.environ.get(
@@ -256,13 +280,12 @@ def parse_args() -> ConversationConfig:
 
 
 def load_whisper_model(name: str) -> whisper.Whisper:
-    print(f"Loading Whisper model '{name}'…", file=sys.stderr)
+    # print(f"Loading Whisper model '{name}'…", file=sys.stderr)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda":
-        print("CUDA available; loading Whisper on GPU.", file=sys.stderr)
-    else:
-        print("CUDA not available; falling back to CPU.", file=sys.stderr)
-    # device="cpu"
+    # if device == "cuda":
+    #     print("CUDA available; loading Whisper on GPU.", file=sys.stderr)
+    # else:
+    #     print("CUDA not available; falling back to CPU.", file=sys.stderr)
     return whisper.load_model(name, device=device)
 
 
@@ -323,10 +346,11 @@ def load_piper_voice(
         )
     else:
         config_to_use = resolved
-        print(
-            f"Loading Piper voice '{model_path.name}' with config '{resolved.name}'…",
-            file=sys.stderr,
-        )
+        config_to_use = resolved
+        # print(
+        #     f"Loading Piper voice '{model_path.name}' with config '{resolved.name}'…",
+        #     file=sys.stderr,
+        # )
 
     try:
         voice = PiperVoice.load(str(model_path), config_path=str(config_to_use))
@@ -354,6 +378,41 @@ def meter_break(show_levels: bool) -> None:
         sys.stderr.flush()
 
 
+def check_bluetooth_connection_status(mac: str) -> bool:
+    """Check if a Bluetooth device is connected via bluetoothctl."""
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "info", mac],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return "Connected: yes" in result.stdout
+    except Exception:
+        return False
+
+
+def find_pulseaudio_card_by_mac(mac: str, max_retries: int = 5, retry_delay: float = 1.0) -> str | None:
+    """Find PulseAudio card by MAC address, with retries."""
+    for attempt in range(max_retries):
+        pactl_result = subprocess.run(
+            ["pactl", "list", "cards", "short"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        
+        for line in pactl_result.stdout.splitlines():
+            if mac.lower() in line.lower():
+                card_id = line.split()[0]
+                return card_id
+        
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+    
+    return None
+
+
 def try_auto_connect_headset(mac: str, name: str) -> bool:
     """Attempt to auto-connect to a saved headset."""
     if not mac or not name:
@@ -362,6 +421,24 @@ def try_auto_connect_headset(mac: str, name: str) -> bool:
     print(f"Attempting to auto-connect to last headset: {name} ({mac})", file=sys.stderr)
     
     try:
+        # Check if already connected
+        if check_bluetooth_connection_status(mac):
+            print(f"Device {name} ({mac}) is already connected.", file=sys.stderr)
+            # Try to find and configure PulseAudio card
+            card_id = find_pulseaudio_card_by_mac(mac, max_retries=3, retry_delay=0.5)
+            if card_id:
+                subprocess.run(
+                    ["pactl", "set-card-profile", card_id, "headset-head-unit"],
+                    capture_output=True,
+                    check=False,
+                )
+                print(f"Auto-connect successful! {name} is connected and configured.", file=sys.stderr)
+                return True
+            else:
+                print(f"Device is connected via Bluetooth, but PulseAudio card not yet available.", file=sys.stderr)
+                print(f"This is normal - the device should work as the system default audio device.", file=sys.stderr)
+                return True
+        
         # Initialize Bluetooth
         subprocess.run(["bluetoothctl", "power", "on"], capture_output=True, check=False)
         subprocess.run(["bluetoothctl", "agent", "on"], capture_output=True, check=False)
@@ -377,30 +454,30 @@ def try_auto_connect_headset(mac: str, name: str) -> bool:
             timeout=10,
         )
         
-        # Wait for connection to establish
-        time.sleep(3)
+        # Wait for connection to establish and check status
+        for attempt in range(5):
+            time.sleep(1)
+            if check_bluetooth_connection_status(mac):
+                break
+        else:
+            print(f"Auto-connect failed: Could not establish Bluetooth connection to {name} ({mac}).", file=sys.stderr)
+            return False
         
-        # Check if connection was successful by looking for the card in PulseAudio
-        pactl_result = subprocess.run(
-            ["pactl", "list", "cards", "short"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        # Try to find and configure PulseAudio card (with retries)
+        card_id = find_pulseaudio_card_by_mac(mac, max_retries=5, retry_delay=1.0)
+        if card_id:
+            subprocess.run(
+                ["pactl", "set-card-profile", card_id, "headset-head-unit"],
+                capture_output=True,
+                check=False,
+            )
+            print(f"Auto-connect successful! Connected {name} ({mac}) in headset (HFP/HSP) mode.", file=sys.stderr)
+            return True
+        else:
+            print(f"Bluetooth connection established to {name} ({mac}), but PulseAudio card not yet available.", file=sys.stderr)
+            print(f"This is normal - the device should work as the system default audio device.", file=sys.stderr)
+            return True
         
-        for line in pactl_result.stdout.splitlines():
-            if mac.lower() in line.lower():
-                card_id = line.split()[0]
-                subprocess.run(
-                    ["pactl", "set-card-profile", card_id, "headset-head-unit"],
-                    capture_output=True,
-                    check=False,
-                )
-                print(f"Auto-connect successful! Connected {name} ({mac}) in headset (HFP/HSP) mode.", file=sys.stderr)
-                return True
-        
-        print("Auto-connect failed. Device not found or not available.", file=sys.stderr)
-        return False
     except Exception as exc:
         print(f"Auto-connect error: {exc}", file=sys.stderr)
         return False
@@ -468,44 +545,42 @@ def connect_to_headset(mac: str, name: str) -> bool:
     try:
         print(f"Connecting to: {name} ({mac})", file=sys.stderr)
         
-        # Trust and connect
-        bluetoothctl_input = f"trust {mac}\nconnect {mac}\n"
-        subprocess.run(
-            ["bluetoothctl"],
-            input=bluetoothctl_input.encode(),
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
+        # Check if already connected
+        if check_bluetooth_connection_status(mac):
+            print(f"Device {name} ({mac}) is already connected via Bluetooth.", file=sys.stderr)
+        else:
+            # Trust and connect
+            bluetoothctl_input = f"trust {mac}\nconnect {mac}\n"
+            subprocess.run(
+                ["bluetoothctl"],
+                input=bluetoothctl_input.encode(),
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            
+            # Wait for connection to establish and verify
+            for attempt in range(5):
+                time.sleep(1)
+                if check_bluetooth_connection_status(mac):
+                    break
+            else:
+                print(f"Warning: Could not verify Bluetooth connection to {name} ({mac}).", file=sys.stderr)
         
-        # Wait for connection to establish
-        time.sleep(2)
+        # Try to find and configure PulseAudio card (with retries)
+        card_id = find_pulseaudio_card_by_mac(mac, max_retries=5, retry_delay=1.0)
+        if card_id:
+            subprocess.run(
+                ["pactl", "set-card-profile", card_id, "headset-head-unit"],
+                capture_output=True,
+                check=False,
+            )
+            print(f"Connected {name} ({mac}) in headset (HFP/HSP) mode.", file=sys.stderr)
+        else:
+            print(f"Bluetooth connection established to {name} ({mac}), but PulseAudio card not yet available.", file=sys.stderr)
+            print(f"This is normal - the device should work as the system default audio device.", file=sys.stderr)
         
-        # Set headset profile
-        pactl_result = subprocess.run(
-            ["pactl", "list", "cards", "short"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        
-        for line in pactl_result.stdout.splitlines():
-            if mac.lower() in line.lower():
-                card_id = line.split()[0]
-                subprocess.run(
-                    ["pactl", "set-card-profile", card_id, "headset-head-unit"],
-                    capture_output=True,
-                    check=False,
-                )
-                print(f"Connected {name} ({mac}) in headset (HFP/HSP) mode.", file=sys.stderr)
-                
-                # Save to environment (will be saved to .env by caller)
-                os.environ["LAST_HEADSET_MAC"] = mac
-                os.environ["LAST_HEADSET_NAME"] = name
-                return True
-        
-        print(f"Connected to {name} ({mac}), but card not found in PulseAudio yet.", file=sys.stderr)
-        print("The device may need a moment to fully initialize.", file=sys.stderr)
+        # Save to environment (will be saved to .env by caller)
         os.environ["LAST_HEADSET_MAC"] = mac
         os.environ["LAST_HEADSET_NAME"] = name
         return True
@@ -520,6 +595,8 @@ def ensure_headset_connected() -> None:
     if LAST_HEADSET_MAC and LAST_HEADSET_NAME:
         if try_auto_connect_headset(LAST_HEADSET_MAC, LAST_HEADSET_NAME):
             return
+        # Auto-connect failed, but device might still be available - continue to scan
+        print("Auto-connect did not succeed. Scanning for available devices...", file=sys.stderr)
         print("", file=sys.stderr)
     
     # Scan for devices
@@ -622,8 +699,8 @@ def phrase_stream(
     q: queue.Queue[np.ndarray] = queue.Queue()
 
     def audio_callback(indata, frames, time_info, status):
-        if status:
-            print(f"[vad] {status}", file=sys.stderr)
+        # if status:
+        #     print(f"[vad] {status}", file=sys.stderr)
         q.put(indata.copy())
 
     print("Listening continuously… (Ctrl+C to exit)")
@@ -697,12 +774,12 @@ def phrase_stream(
 
 def transcribe_audio(model: whisper.Whisper, audio_path: Path, show_levels: bool) -> str:
     meter_break(show_levels)
-    print("Transcribing with Whisper…", file=sys.stderr)
+    # print("Transcribing with Whisper…", file=sys.stderr)
     start_time = time.perf_counter()
     result = model.transcribe(str(audio_path), fp16=False)
     end_time = time.perf_counter()
     duration = end_time - start_time
-    print(f"Whisper transcription completed in {duration:.2f} seconds", file=sys.stderr)
+    # print(f"Whisper transcription completed in {duration:.2f} seconds", file=sys.stderr)
     text = result.get("text", "").strip()
     meter_break(show_levels)
     print(f"You said: {text}")
@@ -735,13 +812,13 @@ def query_ollama(
             snippet += "…"
         break
 
-    if snippet:
-        print(
-            f"Querying Ollama model '{model_name}' with \"{snippet}\"…",
-            file=sys.stderr,
-        )
-    else:
-        print(f"Querying Ollama model '{model_name}'…", file=sys.stderr)
+    # if snippet:
+    #     print(
+    #         f"Querying Ollama model '{model_name}' with \"{snippet}\"…",
+    #         file=sys.stderr,
+    #     )
+    # else:
+    #     print(f"Querying Ollama model '{model_name}'…", file=sys.stderr)
     client = ollama.Client()
     start_time = time.perf_counter()
 
@@ -789,7 +866,7 @@ def query_ollama(
         response = client.chat(model=model_name, messages=messages)
         end_time = time.perf_counter()
         duration = end_time - start_time
-        print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
+        # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
         text = response.get("message", {}).get("content", "").strip()
         meter_break(show_levels)
         print(f"Assistant: {text}")
@@ -828,7 +905,7 @@ def query_ollama(
         if text:
             end_time = time.perf_counter()
             duration = end_time - start_time
-            print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
+            # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
             meter_break(show_levels)
             print(f"Assistant: {text}")
             return text
@@ -843,7 +920,7 @@ def query_ollama(
         response = client.chat(model=model_name, messages=messages)
         end_time = time.perf_counter()
         duration = end_time - start_time
-        print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
+        # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
         text = response.get("message", {}).get("content", "").strip()
         meter_break(show_levels)
         print(f"Assistant: {text}")
@@ -855,7 +932,7 @@ def query_ollama(
 def synthesize_with_piper(
     voice: PiperVoice, text: str, output_wav: Path
 ) -> None:
-    print("Synthesizing speech with Piper…", file=sys.stderr)
+    # print("Synthesizing speech with Piper…", file=sys.stderr)
     audio_iter = voice.synthesize(text)
     base_sample_rate = int(
         getattr(voice, "sample_rate", getattr(getattr(voice, "config", {}), "sample_rate", DEFAULT_SAMPLE_RATE))
@@ -1057,11 +1134,46 @@ def run_conversation(config: ConversationConfig) -> None:
                 file=sys.stderr,
             )
         else:
-            print(
-                f"Warning: no input device found matching '{config.input_device_keyword}'."
-                " Falling back to system default.",
-                file=sys.stderr,
-            )
+            # Check if we just connected a Bluetooth device
+            bluetooth_connected = False
+            if LAST_HEADSET_MAC:
+                bluetooth_connected = check_bluetooth_connection_status(LAST_HEADSET_MAC)
+            
+            # Get the default input device to see what we're actually using
+            try:
+                default_device = sd.query_devices(kind='input')
+                default_name = default_device.get('name', 'unknown') if default_device else 'unknown'
+                
+                if bluetooth_connected:
+                    print(
+                        f"Note: Bluetooth device '{config.input_device_keyword}' is connected, "
+                        f"but not found by exact name match in audio devices.",
+                        file=sys.stderr,
+                    )
+                    print(
+                        f"Using system default input device: '{default_name}' "
+                        f"(this is likely the Bluetooth headset).",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"Note: no input device found matching '{config.input_device_keyword}'. "
+                        f"Falling back to system default: '{default_name}'.",
+                        file=sys.stderr,
+                    )
+            except Exception:
+                if bluetooth_connected:
+                    print(
+                        f"Note: Bluetooth device '{config.input_device_keyword}' is connected, "
+                        f"but not found by exact name match. Using system default audio device.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"Note: no input device found matching '{config.input_device_keyword}'. "
+                        "Falling back to system default.",
+                        file=sys.stderr,
+                    )
 
     stop_event = threading.Event()
     segment_queue: queue.Queue[np.ndarray] = queue.Queue()
