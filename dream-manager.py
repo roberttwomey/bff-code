@@ -502,9 +502,20 @@ def generate_image(
     if scheduler and "scheduler" not in payload:
         payload["scheduler"] = scheduler
     
-    # Add seed if provided
-    if seed is not None:
-        payload["seed"] = seed
+    # Generate seed if not provided (for filename generation)
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    
+    # Add seed to payload
+    payload["seed"] = seed
+    
+    # Extract base filename for consistent naming
+    timestamp = int(time.time())
+    if output_filename:
+        # Extract base name from custom filename (remove extension)
+        base_filename = os.path.splitext(output_filename)[0]
+    else:
+        base_filename = "image"
     
     # Ensure robot is in dreaming state before synthesis (lying down, lidar off, cyan solid)
     ensure_robot_dreaming_state()
@@ -547,7 +558,7 @@ def generate_image(
         "height": height,
         "batch_size": batch_size,
         "styles": styles,
-        "timestamp": int(time.time()),
+        "timestamp": timestamp,
         "model_checkpoint": MODEL_CHECKPOINT,
         "generation_type": "image",
         **{k: v for k, v in kwargs.items() if k != "alwayson_scripts"}  # Exclude complex nested objects
@@ -558,15 +569,11 @@ def generate_image(
         # Decode base64 image
         img_data = base64.b64decode(img_b64.split(",", 1)[-1])
         
-        if output_filename:
-            if i == 0:
-                out_name = output_filename
-            else:
-                stem, ext = os.path.splitext(output_filename)
-                out_name = f"{stem}_{i}{ext}"
+        # Generate filename with seed and timestamp for consistency
+        if i == 0:
+            out_name = f"{base_filename}_seed_{actual_seed}_{timestamp}.png"
         else:
-            timestamp = int(time.time())
-            out_name = f"generated_{timestamp}_{i}.png"
+            out_name = f"{base_filename}_seed_{actual_seed}_{timestamp}_{i}.png"
         
         out_path = os.path.join(output_dir, out_name)
         with open(out_path, "wb") as f:
@@ -913,30 +920,30 @@ def generate_video(
         base_filename = os.path.splitext(output_filename)[0]
     
     # First, generate a still image (0 frames) with metadata
-    print(f"\n{'='*60}")
-    print(f"  Generating still image (0 frames)")
-    print(f"{'='*60}")
+    # print(f"\n{'='*60}")
+    # print(f"  Generating still image (0 frames)")
+    # print(f"{'='*60}")
     
     image_paths = []
-    try:
-        image_filename = f"{base_filename}_seed_{seed}_{timestamp}_0frames.png"
+    # try:
+    #     image_filename = f"{base_filename}_seed_{seed}_{timestamp}_0frames.png"
         
-        # Extract relevant kwargs for generate_image
-        image_kwargs = {k: v for k, v in kwargs.items() 
-                       if k in ['negative_prompt', 'steps', 'sampler_name', 'scheduler', 
-                               'cfg_scale', 'width', 'height', 'batch_size', 'styles']}
+    #     # Extract relevant kwargs for generate_image
+    #     image_kwargs = {k: v for k, v in kwargs.items() 
+    #                    if k in ['negative_prompt', 'steps', 'sampler_name', 'scheduler', 
+    #                            'cfg_scale', 'width', 'height', 'batch_size', 'styles']}
         
-        image_paths = generate_image(
-            prompt=prompt,
-            output_dir=output_dir,
-            output_filename=image_filename,
-            seed=seed,
-            **image_kwargs
-        )
-        print(f"✓ Completed still image generation")
-    except Exception as e:
-        print(f"✗ Error generating still image: {e}")
-        # Continue with video generation even if image fails
+    #     image_paths = generate_image(
+    #         prompt=prompt,
+    #         output_dir=output_dir,
+    #         output_filename=image_filename,
+    #         seed=seed,
+    #         **image_kwargs
+    #     )
+    #     print(f"✓ Completed still image generation")
+    # except Exception as e:
+    #     print(f"✗ Error generating still image: {e}")
+    #     # Continue with video generation even if image fails
     
     # Now generate the video
     print(f"\n{'='*60}")
@@ -1007,9 +1014,9 @@ def generate_video(
         except (json.JSONDecodeError, KeyError):
             pass
     
-    # Generate filename with seed, timestamp, and frame count if using default filename
-    if output_filename == "animation.gif":
-        output_filename = f"{base_filename}_seed_{actual_seed}_{timestamp}_{video_length}frames.gif"
+    # Generate filename with seed, timestamp, and frame count
+    # Always use consistent format for better organization
+    output_filename = f"{base_filename}_seed_{actual_seed}_{timestamp}.gif"
     
     # Prepare metadata for saving
     metadata = {
@@ -1315,10 +1322,12 @@ if __name__ == "__main__":
                 
                 print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
                 try:
+                    # Use simple base filename with index for batch organization
+                    output_filename = f"image_{i}.png"
                     generate_image(
                         prompt=prompt,
                         output_dir=args.output_dir,
-                        output_filename=None, # Auto-generate filename
+                        output_filename=output_filename,
                         seed=args.seed
                     )
                 except Exception as e:
@@ -1365,9 +1374,8 @@ if __name__ == "__main__":
                 
                 print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
                 try:
-                    # Generate a unique base filename
-                    timestamp = int(time.time())
-                    base_filename = f"animation_{timestamp}_{i}"
+                    # Use simple base filename - generate_video will add seed/timestamp/frames
+                    base_filename = f"animation_{i}"
                     
                     if args.progressive:
                         generate_video_progressive(
@@ -1378,11 +1386,12 @@ if __name__ == "__main__":
                             seed=args.seed
                         )
                     else:
-                        output_filename = f"{base_filename}.gif"
+                        # Don't specify output_filename to use auto-generation
+                        # or pass the base if we want to override default "animation"
                         generate_video(
                             prompt=prompt,
                             output_dir=args.output_dir,
-                            output_filename=output_filename,
+                            output_filename=f"{base_filename}.gif",
                             seed=args.seed
                         )
                 except Exception as e:
