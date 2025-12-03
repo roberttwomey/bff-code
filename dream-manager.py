@@ -777,6 +777,7 @@ if __name__ == "__main__":
                         help="Command to execute")
     parser.add_argument("--prompt", type=str, help="Prompt for generation")
     parser.add_argument("--prompt-file", type=str, help="File containing prompts for batch generation")
+    parser.add_argument("--append-style", type=str, help="Style string to append to all prompts")
     parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--output-file", type=str, help="Output filename")
     parser.add_argument("--seed", type=int, help="Random seed")
@@ -806,13 +807,17 @@ if __name__ == "__main__":
             print("Error: --prompt is required for image generation")
             sys.exit(1)
         
+        prompt = args.prompt
+        if args.append_style:
+            prompt += " " + args.append_style
+        
         if not is_server_running():
             print("Server not running. Starting server...")
             start_server()
             set_model()
         
         generate_image(
-            prompt=args.prompt,
+            prompt=prompt,
             output_dir=args.output_dir,
             output_filename=args.output_file,
             seed=args.seed
@@ -823,13 +828,17 @@ if __name__ == "__main__":
             print("Error: --prompt is required for video generation")
             sys.exit(1)
         
+        prompt = args.prompt
+        if args.append_style:
+            prompt += " " + args.append_style
+        
         if not is_server_running():
             print("Server not running. Starting server...")
             start_server()
             set_model()
         
         generate_video(
-            prompt=args.prompt,
+            prompt=prompt,
             output_dir=args.output_dir,
             output_filename=args.output_file or "animation.gif",
             seed=args.seed
@@ -856,6 +865,9 @@ if __name__ == "__main__":
             print(f"Found {len(prompts)} prompts in {args.prompt_file}")
             
             for i, prompt in enumerate(prompts):
+                if args.append_style:
+                    prompt += " " + args.append_style
+                
                 print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
                 try:
                     generate_image(
@@ -894,6 +906,9 @@ if __name__ == "__main__":
             print(f"Found {len(prompts)} prompts in {args.prompt_file}")
             
             for i, prompt in enumerate(prompts):
+                if args.append_style:
+                    prompt += " " + args.append_style
+                
                 print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
                 try:
                     # Generate a unique filename for the video
