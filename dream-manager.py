@@ -11,6 +11,8 @@ python dream-manager.py stop
 python dream-manager.py generate-image "A photo of an astronaut riding a horse"
 python dream-manager.py generate-video "A video of an astronaut riding a horse"
 
+python dream-manager.py batch-video --prompt-file prompts.txt
+python dream-manager.py batch-image --prompt-file prompts.txt
 """
 import subprocess
 import time
