@@ -4,6 +4,13 @@ Launch and manage Automatic1111 Stable Diffusion WebUI in Docker headless mode.
 Provides methods to start the server, generate images/videos, and shut down.
 Also controls robot state: when running, robot lies down with cyan light and lidar off.
 During synthesis, cyan light blinks.
+
+Usage: 
+python dream-manager.py start
+python dream-manager.py stop
+python dream-manager.py generate-image "A photo of an astronaut riding a horse"
+python dream-manager.py generate-video "A video of an astronaut riding a horse"
+
 """
 import subprocess
 import time
@@ -512,8 +519,8 @@ def generate_video(
     sampler_name: str = "DPM++ 2M Karras",
     cfg_scale: float = 7,
     seed: Optional[int] = None,
-    width: int = 256,
-    height: int = 256,
+    width: int = 128,#256,
+    height: int = 128,#256,
     batch_size: int = 1,
     styles: Optional[List[str]] = None,
     output_dir: str = "outputs",
@@ -766,9 +773,10 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Manage Stable Diffusion WebUI Docker container")
-    parser.add_argument("command", choices=["start", "stop", "status", "image", "video"],
+    parser.add_argument("command", choices=["start", "stop", "status", "image", "video", "batch-image", "batch-video"],
                         help="Command to execute")
     parser.add_argument("--prompt", type=str, help="Prompt for generation")
+    parser.add_argument("--prompt-file", type=str, help="File containing prompts for batch generation")
     parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--output-file", type=str, help="Output filename")
     parser.add_argument("--seed", type=int, help="Random seed")
@@ -827,3 +835,81 @@ if __name__ == "__main__":
             seed=args.seed
         )
 
+    elif args.command == "batch-image":
+        if not args.prompt_file:
+            print("Error: --prompt-file is required for batch image generation")
+            sys.exit(1)
+        
+        if not os.path.exists(args.prompt_file):
+            print(f"Error: Prompt file '{args.prompt_file}' not found")
+            sys.exit(1)
+
+        if not is_server_running():
+            print("Server not running. Starting server...")
+            start_server()
+            set_model()
+        
+        try:
+            with open(args.prompt_file, 'r') as f:
+                prompts = [line.strip() for line in f if line.strip()]
+            
+            print(f"Found {len(prompts)} prompts in {args.prompt_file}")
+            
+            for i, prompt in enumerate(prompts):
+                print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
+                try:
+                    generate_image(
+                        prompt=prompt,
+                        output_dir=args.output_dir,
+                        output_filename=None, # Auto-generate filename
+                        seed=args.seed
+                    )
+                except Exception as e:
+                    print(f"Error generating image for prompt '{prompt}': {e}")
+                    # Continue with next prompt
+                    
+        except Exception as e:
+            print(f"Error reading prompt file: {e}")
+            sys.exit(1)
+
+
+    elif args.command == "batch-video":
+        if not args.prompt_file:
+            print("Error: --prompt-file is required for batch video generation")
+            sys.exit(1)
+        
+        if not os.path.exists(args.prompt_file):
+            print(f"Error: Prompt file '{args.prompt_file}' not found")
+            sys.exit(1)
+
+        if not is_server_running():
+            print("Server not running. Starting server...")
+            start_server()
+            set_model()
+        
+        try:
+            with open(args.prompt_file, 'r') as f:
+                prompts = [line.strip() for line in f if line.strip()]
+            
+            print(f"Found {len(prompts)} prompts in {args.prompt_file}")
+            
+            for i, prompt in enumerate(prompts):
+                print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
+                try:
+                    # Generate a unique filename for the video
+                    timestamp = int(time.time())
+                    output_filename = f"animation_{timestamp}_{i}.gif"
+                    
+                    generate_video(
+                        prompt=prompt,
+                        output_dir=args.output_dir,
+                        output_filename=output_filename,
+                        seed=args.seed
+                    )
+                except Exception as e:
+                    print(f"Error generating video for prompt '{prompt}': {e}")
+                    # Continue with next prompt
+                    
+        except Exception as e:
+            print(f"Error reading prompt file: {e}")
+            sys.exit(1)
