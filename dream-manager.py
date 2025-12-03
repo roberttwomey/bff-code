@@ -66,7 +66,7 @@ DEFAULT_HEIGHT = int(os.getenv('HEIGHT', '256'))
 DEFAULT_STEPS = int(os.getenv('STEPS', '20'))
 DEFAULT_FPS = int(os.getenv('FPS', '8'))
 DEFAULT_FRAMES = int(os.getenv('FRAMES', '32'))
-DEFAULT_CLOSED_LOOP = os.getenv('CLOSED_LOOP', 'R+P')
+DEFAULT_CLOSED_LOOP = os.getenv('CLOSED_LOOP', 'N')
 
 # Global state
 _container_id: Optional[str] = None
@@ -689,7 +689,7 @@ def regenerate_video_from_metadata(metadata_path: str, output_dir: Optional[str]
     animatediff_batch_size = metadata.get("animatediff_batch_size", 16)
     stride = metadata.get("stride", 1)
     overlap = metadata.get("overlap", 4)
-    closed_loop = metadata.get("closed_loop", "R+P")
+    closed_loop = metadata.get("closed_loop", "N")
     
     # Use specified output_dir or default to "outputs"
     if output_dir is None:
@@ -1199,7 +1199,8 @@ def is_server_running() -> bool:
 def cleanup_handler(signum, frame):
     """Handle cleanup on signal."""
     print("\nReceived shutdown signal, cleaning up...")
-    shutdown_server()
+    #shutdown_server()
+    print("\nNOT SHUTTING DOWN SERVER")
     sys.exit(0)
 
 

@@ -29,7 +29,7 @@ except ImportError:
 ETHERNET_INTERFACE = "enP8p1s0"
 SD_SERVER = "http://127.0.0.1:7860"
 OUTPUTS_DIR = "outputs"
-DREAM_CHECK_INTERVAL = 2.0  # seconds between dreamstate checks
+DREAM_CHECK_INTERVAL = 60.0  # seconds between dreamstate checks
 PORT = 8080
 
 app = Flask(__name__)
@@ -42,8 +42,30 @@ is_dreaming = False
 recent_dreams = []  # List of (path, type) tuples, sorted by modification time (newest first)
 dream_lock = threading.Lock()
 channel_factory_initialized = False
-CYCLE_INTERVAL = 3.0#5.0  # seconds between cycling to next image/video
-MAX_DREAMS = 20  # maximum number of recent dreams to track
+CYCLE_INTERVAL = 5.0  # seconds between cycling to next image/video
+MAX_DREAMS = 60  # maximum number of recent dreams to track
+
+# Subtitle mappings for animation files
+SUBTITLES = {
+    0: "(BFF) is a new media artwork exploring intimacy, embodiment, intelligence, and alignment in human-AI relationships",
+    1: "through co-parenting two robot dogs.",
+    2: "Documented as an experimental film",
+    3: "he project follows two-artist researchers",
+    4: "each paired with an identical robot dog and local LLM",
+    5: "as they cultivate emotional bonds, train model behavior",
+    6: "and dialogue on questions of mind, embodiment, and relationality in the age of generative AI",
+    7: "Structured as a metalogue, it blends dialogue with rich multi-modal imagery",
+    8: "drawn from a range of human and machine perspectives.",
+    9: "Working with LIDAR scans, 360° video, gaussian splats",
+    10: "and snapshots of internal internal model states",
+    11: "The film constructs a hybrid cinematic language",
+    12: "that toggles between perception and affect, embodiment, computation, and language.",
+    13: "As the collaborators exchange and evolve the AI's mind",
+    14: "BFF documents this distributed act of care and co-creation",
+    15: "The film interrogates the boundaries between simulation and authenticity",
+    16: "emotional labor and machine learning, human complexity and synthetic intelligence",
+    17: "offering a poetic meditation on what we aspire to, what we search for in relation to our machine kin."
+}
 
 # HTML template
 HTML_TEMPLATE = """
@@ -75,10 +97,8 @@ HTML_TEMPLATE = """
             position: relative;
         }
         .media-item {
-            max-width: 100vw;
-            max-height: 100vh;
-            width: auto;
-            height: auto;
+            width: 100vw;
+            height: 100vh;
             object-fit: contain;
             display: none;
         }
@@ -90,6 +110,22 @@ HTML_TEMPLATE = """
             height: 100%;
             object-fit: contain;
         }
+        .subtitle-overlay {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 70%;
+            max-width: 1200px;
+            text-align: left;
+            color: #FFD700;
+            font-size: 48px;
+            font-family: Arial, sans-serif;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
+            z-index: 1000;
+            padding: 20px;
+            line-height: 1.4;
+        }
     </style>
 </head>
 <body>
@@ -97,6 +133,7 @@ HTML_TEMPLATE = """
         <div class="media-container" id="mediaContainer">
             <!-- Media items will be populated by JavaScript -->
         </div>
+        <div class="subtitle-overlay" id="subtitleOverlay"></div>
     {% else %}
         <div class="media-container">
             <img src="{{ url_for('camera_feed') }}" alt="Camera Stream" style="display: block;">
@@ -108,6 +145,67 @@ HTML_TEMPLATE = """
         let currentIndex = 0;
         let dreams = [];
         const cycleInterval = {{ cycle_interval }} * 1000; // Convert to milliseconds
+        
+        // Subtitle mappings for animation files
+        const subtitles = {
+            0: "(BFF) is a new media artwork exploring intimacy, embodiment, intelligence, and alignment in human-AI relationships",
+            1: "through co-parenting two robot dogs.",
+            2: "Documented as an experimental film",
+            3: "the project follows two-artist researchers",
+            4: "each paired with an identical robot dog and local LLM",
+            5: "as they cultivate emotional bonds, train model behavior",
+            6: "and dialogue on questions of mind, embodiment, and relationality in the age of generative AI",
+            7: "Structured as a metalogue, it blends dialogue with rich multi-modal imagery",
+            8: "drawn from a range of human and machine perspectives.",
+            9: "Working with LIDAR scans, 360° video, gaussian splats",
+            10: "and snapshots of internal internal model states",
+            11: "The film constructs a hybrid cinematic language",
+            12: "that toggles between perception and affect, embodiment, computation, and language.",
+            13: "As the collaborators exchange and evolve the AI's mind",
+            14: "BFF documents this distributed act of care and co-creation",
+            15: "The film interrogates the boundaries between simulation and authenticity",
+            16: "emotional labor and machine learning, human complexity and synthetic intelligence",
+            17: "offering a poetic meditation on what we aspire to, what we search for in relation to our machine kin."
+        };
+        
+        // Extract animation number from filename
+        // Supports: animation_1764765844_14.gif or animation_9_seed_2447328037_1764780844.gif
+        function getAnimationNumber(filename) {
+            // Try pattern: animation_{timestamp}_{number}.ext
+            let match = filename.match(/animation_(\d+)_(\d+)/);
+            if (match) {
+                const num1 = parseInt(match[1], 10);
+                const num2 = parseInt(match[2], 10);
+                // Timestamp is the larger number (>1 billion), animation number is smaller (0-17)
+                if (num1 > 1000000000) {
+                    return num2;  // num1 is timestamp, num2 is animation number
+                } else {
+                    return num1;  // num1 is animation number, num2 is timestamp
+                }
+            }
+            
+            // Try pattern: animation_{number}_seed_{seed}_{timestamp}.ext
+            match = filename.match(/animation_(\d+)_seed_\d+_(\d+)/);
+            if (match) {
+                return parseInt(match[1], 10);  // First number is animation number
+            }
+            
+            return null;
+        }
+        
+        // Update subtitle based on current dream filename
+        function updateSubtitle(filename) {
+            const subtitleDiv = document.getElementById('subtitleOverlay');
+            if (!subtitleDiv) return;
+            
+            const animNum = getAnimationNumber(filename);
+            if (animNum !== null && subtitles[animNum]) {
+                subtitleDiv.textContent = subtitles[animNum];
+                subtitleDiv.style.display = 'block';
+            } else {
+                subtitleDiv.style.display = 'none';
+            }
+        }
         
         // Fetch list of dreams
         async function loadDreams() {
@@ -168,9 +266,12 @@ HTML_TEMPLATE = """
         // Show specific item and set up appropriate timing
         function showItem(index) {
             const items = document.querySelectorAll('.media-item');
+            let currentFilename = '';
+            
             items.forEach((item, i) => {
                 if (i === index) {
                     item.classList.add('active');
+                    currentFilename = item.dataset.dreamFilename || '';
                     // If it's a video, restart it
                     if (item.tagName === 'VIDEO') {
                         item.currentTime = 0;
@@ -184,6 +285,9 @@ HTML_TEMPLATE = """
                     }
                 }
             });
+            
+            // Update subtitle based on filename
+            updateSubtitle(currentFilename);
             
             // Schedule next item based on media type
             scheduleNextForItem(index);
@@ -299,8 +403,46 @@ def check_dreamstate():
         return False
 
 
+def parse_animation_info(filename):
+    """
+    Parse animation number and timestamp from filename.
+    
+    Supports patterns:
+    - animation_1764765844_14.gif -> (14, 1764765844)
+    - animation_9_seed_2447328037_1764780844.gif -> (9, 1764780844)
+    
+    Returns tuple: (animation_number, timestamp) or (None, None) if not found
+    """
+    import re
+    
+    # Try pattern: animation_{timestamp}_{number}.ext
+    match = re.search(r'animation_(\d+)_(\d+)', filename)
+    if match:
+        timestamp = int(match.group(1))
+        anim_num = int(match.group(2))
+        # Check which is more likely the timestamp (larger number, ~10 digits)
+        if timestamp > 1000000000:  # Unix timestamp range
+            return (anim_num, timestamp)
+        else:
+            return (timestamp, anim_num)
+    
+    # Try pattern: animation_{number}_seed_{seed}_{timestamp}.ext
+    match = re.search(r'animation_(\d+)_seed_\d+_(\d+)', filename)
+    if match:
+        anim_num = int(match.group(1))
+        timestamp = int(match.group(2))
+        return (anim_num, timestamp)
+    
+    return (None, None)
+
+
 def find_recent_dreams(outputs_dir=OUTPUTS_DIR, max_count=MAX_DREAMS):
-    """Find the most recent synthesized images and videos in outputs directory."""
+    """Find the most recent synthesized images and videos in outputs directory.
+    
+    Groups animations into batches (sets generated close together in time), then sorts:
+    1. Batch - descending (newest batch first, identified by max timestamp in batch)
+    2. Animation number (0-17) - ascending (within each batch)
+    """
     outputs_path = Path(outputs_dir)
     if not outputs_path.exists():
         return []
@@ -315,16 +457,83 @@ def find_recent_dreams(outputs_dir=OUTPUTS_DIR, max_count=MAX_DREAMS):
     for ext in image_extensions | video_extensions:
         for file_path in outputs_path.glob(f"*{ext}"):
             if file_path.is_file():
-                mtime = file_path.stat().st_mtime
+                filename = file_path.name
+                anim_num, timestamp = parse_animation_info(filename)
+                
                 if ext in image_extensions:
                     file_type = 'image'
                 else:
                     file_type = 'video'
-                all_files.append((mtime, str(file_path), file_type))
+                
+                # Store: (timestamp, animation_number, path, file_type)
+                # Use 0 for None timestamp to sort them last
+                sort_timestamp = timestamp if timestamp is not None else 0
+                sort_anim_num = anim_num if anim_num is not None else 9999
+                all_files.append((sort_timestamp, sort_anim_num, str(file_path), file_type))
     
-    # Sort by modification time (newest first) and return top max_count
-    all_files.sort(reverse=True, key=lambda x: x[0])
-    return [(path, file_type) for _, path, file_type in all_files[:max_count]]
+    # Group animations into batches based on animation number patterns
+    # Each batch should contain at most ONE of each animation number (0-17)
+    # Sort by timestamp descending to process newest first
+    all_files.sort(key=lambda x: -x[0])
+    
+    batches = []
+    current_batch = []
+    seen_anim_nums = set()
+    batch_max_timestamp = None
+    
+    for timestamp, anim_num, path, file_type in all_files:
+        if timestamp == 0:  # Skip files without timestamps
+            continue
+        
+        # If we've already seen this animation number in the current batch,
+        # start a new batch (this indicates a new generation run)
+        if anim_num in seen_anim_nums:
+            # Save current batch
+            if current_batch:
+                batches.append((batch_max_timestamp, current_batch))
+            # Start new batch
+            current_batch = [(timestamp, anim_num, path, file_type)]
+            seen_anim_nums = {anim_num}
+            batch_max_timestamp = timestamp
+        else:
+            # Add to current batch
+            if batch_max_timestamp is None:
+                batch_max_timestamp = timestamp
+            current_batch.append((timestamp, anim_num, path, file_type))
+            seen_anim_nums.add(anim_num)
+    
+    # Add last batch
+    if current_batch:
+        batches.append((batch_max_timestamp, current_batch))
+    
+    # Sort each batch by animation number
+    sorted_files = []
+    for batch_max_ts, batch_files in batches:
+        # Sort by animation number within batch
+        batch_files.sort(key=lambda x: x[1])
+        sorted_files.extend(batch_files)
+    
+    # Debug: Print sort order
+    print("\n" + "="*80)
+    print("DEBUG: Dream files grouped by batch, sorted by animation number:")
+    print("="*80)
+    batch_num = 0
+    items_printed = 0
+    for batch_max_ts, batch_files in batches:
+        if items_printed >= max_count:
+            break
+        batch_num += 1
+        print(f"\n--- Batch {batch_num} (max timestamp: {batch_max_ts}, {len(batch_files)} animations) ---")
+        for timestamp, anim_num, path, file_type in batch_files:
+            if items_printed >= max_count:
+                break
+            filename = os.path.basename(path)
+            print(f"  Timestamp: {timestamp:>12} | Anim #{anim_num:>2} | Type: {file_type:>5} | {filename}")
+            items_printed += 1
+    print("\n" + "="*80 + "\n")
+    
+    # Return top max_count, keeping only path and file_type
+    return [(path, file_type) for _, _, path, file_type in sorted_files[:max_count]]
 
 
 def dreamstate_monitor():
