@@ -1219,6 +1219,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, help="Random seed")
     parser.add_argument("--progressive", action="store_true", help="Generate progressively: still image, then videos (16, 32 frames)")
     parser.add_argument("--stages", type=str, help="Comma-separated frame counts for progressive video generation (e.g., '16,32,48,64', min 8 frames)")
+    parser.add_argument("--no-body", action="store_true", help="Disable robot control (no DDS connections or robot state changes)")
     
     args = parser.parse_args()
     
@@ -1227,12 +1228,12 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, cleanup_handler)
     
     if args.command == "start":
-        start_server()
+        start_server(enable_robot_control=not args.no_body)
         set_model()
         print("Server started successfully!")
     
     elif args.command == "stop":
-        shutdown_server()
+        shutdown_server(enable_robot_control=not args.no_body)
     
     elif args.command == "status":
         if is_server_running():
@@ -1251,7 +1252,7 @@ if __name__ == "__main__":
         
         if not is_server_running():
             print("Server not running. Starting server...")
-            start_server()
+            start_server(enable_robot_control=not args.no_body)
             set_model()
         
         generate_image(
@@ -1272,7 +1273,7 @@ if __name__ == "__main__":
         
         if not is_server_running():
             print("Server not running. Starting server...")
-            start_server()
+            start_server(enable_robot_control=not args.no_body)
             set_model()
         
         if args.progressive:
@@ -1317,7 +1318,7 @@ if __name__ == "__main__":
 
         if not is_server_running():
             print("Server not running. Starting server...")
-            start_server()
+            start_server(enable_robot_control=not args.no_body)
             set_model()
         
         try:
@@ -1360,7 +1361,7 @@ if __name__ == "__main__":
 
         if not is_server_running():
             print("Server not running. Starting server...")
-            start_server()
+            start_server(enable_robot_control=not args.no_body)
             set_model()
         
         # Parse custom stages if provided
@@ -1423,7 +1424,7 @@ if __name__ == "__main__":
         
         if not is_server_running():
             print("Server not running. Starting server...")
-            start_server()
+            start_server(enable_robot_control=not args.no_body)
             set_model()
         
         try:
