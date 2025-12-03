@@ -56,6 +56,8 @@ class FidgetBehavior(enum.Enum):
     TURN_RIGHT = "turn_right"
     STEP_FORWARD = "step_forward"
     STEP_BACK = "step_back"
+    STEP_LEFT = "step_left"
+    STEP_RIGHT = "step_right"
     STAND_ON_BACK_LEGS = "stand_on_back_legs"
 
 class BehavioralStateMachine:
@@ -96,7 +98,7 @@ class BehavioralStateMachine:
         self.current_state = RobotState.POWER_OFF  # None indicates no state has been set yet
         self.last_controller_activity_time = time.time()
         self.last_uwb_activity_time = time.time()
-        self.idle_timeout = 45  # seconds
+        self.idle_timeout = 60  # seconds
         self.monitoring = True
         
         # Wireless controller state
@@ -106,12 +108,30 @@ class BehavioralStateMachine:
         
         # Fidget behavior settings
         self.fidget_enabled = True
-        self.min_fidget_interval = 3  # minimum seconds between fidgets
-        self.max_fidget_interval = 7  # maximum seconds between fidgets
+        self.min_fidget_interval = 1  # minimum seconds between fidgets
+        self.max_fidget_interval = 4  # maximum seconds between fidgets
         self.last_fidget_time = time.time()
         self.next_fidget_time = time.time() + random.uniform(self.min_fidget_interval, self.max_fidget_interval)
         self.currently_fidgeting = False
-        self.fidget_idle_threshold = 3  # Only fidget after 3 seconds of inactivity
+        self.fidget_idle_threshold = 2.0  # Only fidget after 3 seconds of inactivity
+        
+        # Fidget behavior weights (higher = more likely)
+        self.fidget_weights = {
+            FidgetBehavior.TURN_LEFT: 3.0,
+            FidgetBehavior.TURN_RIGHT: 3.0,
+            FidgetBehavior.STEP_FORWARD: 1.0,
+            FidgetBehavior.STEP_BACK: 1.0,
+            FidgetBehavior.STEP_LEFT: 1.0,
+            FidgetBehavior.STEP_RIGHT: 1.0,
+            FidgetBehavior.STAND_ON_BACK_LEGS: 0.5
+            # FidgetBehavior.TURN_LEFT: 1.0, #3.0,
+            # FidgetBehavior.TURN_RIGHT: 1.0, #3.0,
+            # FidgetBehavior.STEP_FORWARD: 1.0,
+            # FidgetBehavior.STEP_BACK: 1.0,
+            # FidgetBehavior.STEP_LEFT: 1.0,
+            # FidgetBehavior.STEP_RIGHT: 1.0,
+            # FidgetBehavior.STAND_ON_BACK_LEGS: 5.0,
+        }
         
         # Subscribe to low state for controller input
         self.lowstate_subscriber = ChannelSubscriber("rt/lf/lowstate", LowState_)
@@ -348,7 +368,7 @@ class BehavioralStateMachine:
         print("\n[FIDGET] Turning left slightly...")
         try:
             # Small turn: vx=0, vy=0, vyaw=0.3 rad/s for 0.8 seconds
-            self.sport_client.Move(0.0, 0.0, 0.3)
+            self.sport_client.Move(0.0, 0.0, 0.5)
             time.sleep(random.uniform(1.5, 2.5))
             self.sport_client.StopMove()
             self.balance_stand()
@@ -360,7 +380,7 @@ class BehavioralStateMachine:
         print("\n[FIDGET] Turning right slightly...")
         try:
             # Small turn: vx=0, vy=0, vyaw=-0.3 rad/s for 0.8 seconds
-            self.sport_client.Move(0.0, 0.0, -0.3)
+            self.sport_client.Move(0.0, 0.0, -0.5)
             time.sleep(random.uniform(1.5, 2.5))
             self.sport_client.StopMove()
             self.balance_stand()
@@ -391,6 +411,30 @@ class BehavioralStateMachine:
         except Exception as e:
             print(f"Error in fidget step back: {e}")
     
+    def fidget_step_left(self):
+        """Small step to the left"""
+        print("\n[FIDGET] Stepping left...")
+        try:
+            # Small step: vx=0, vy=0.25 m/s, vyaw=0 for 2-4 seconds
+            self.sport_client.Move(0.0, 0.25, 0.0)
+            time.sleep(random.uniform(2.0, 4.0))
+            self.sport_client.StopMove()
+            self.balance_stand()
+        except Exception as e:
+            print(f"Error in fidget step left: {e}")
+    
+    def fidget_step_right(self):
+        """Small step to the right"""
+        print("\n[FIDGET] Stepping right...")
+        try:
+            # Small step: vx=0, vy=-0.25 m/s, vyaw=0 for 2-4 seconds
+            self.sport_client.Move(0.0, -0.25, 0.0)
+            time.sleep(random.uniform(2.0, 4.0))
+            self.sport_client.StopMove()
+            self.balance_stand()
+        except Exception as e:
+            print(f"Error in fidget step right: {e}")
+    
     def fidget_stand_on_back_legs(self):
         """Stand on back legs (rear up), then return to normal stance"""
         print("\n[FIDGET] Standing on back legs...")
@@ -398,13 +442,20 @@ class BehavioralStateMachine:
             # Use Euler command to pitch the body up
             # Euler(roll, pitch, yaw) - positive pitch tilts forward, negative tilts back
             # self.sport_client.Euler(0.0, -0.4, 0.0)  # Tilt back
-            time.sleep(2.0)
+        
+            # time.sleep(2.0)
             
             # Return to normal stance
             # print("[FIDGET] Returning to normal stance...")
             # self.sport_client.Euler(0.0, 0.0, 0.0)
             # time.sleep(1.0)
             # self.balance_stand()
+
+            self.sport_client.WalkUpright(True)
+            time.sleep(random.uniform(3.0, 6.0))
+            self.sport_client.WalkUpright(False)
+            print("ret: ",ret)
+
         except Exception as e:
             print(f"Error in fidget stand on back legs: {e}")
     
@@ -432,16 +483,22 @@ class BehavioralStateMachine:
         
         self.currently_fidgeting = True
         
-        # Choose random fidget behavior
+        # Choose random fidget behavior with weighted probabilities
         fidget_behaviors = [
             (FidgetBehavior.TURN_LEFT, self.fidget_turn_left),
             (FidgetBehavior.TURN_RIGHT, self.fidget_turn_right),
             (FidgetBehavior.STEP_FORWARD, self.fidget_step_forward),
             (FidgetBehavior.STEP_BACK, self.fidget_step_back),
+            (FidgetBehavior.STEP_LEFT, self.fidget_step_left),
+            (FidgetBehavior.STEP_RIGHT, self.fidget_step_right),
             (FidgetBehavior.STAND_ON_BACK_LEGS, self.fidget_stand_on_back_legs),
         ]
         
-        behavior, behavior_func = random.choice(fidget_behaviors)
+        # Extract weights in the same order as behaviors
+        weights = [self.fidget_weights[behavior] for behavior, _ in fidget_behaviors]
+        
+        # Use weighted random selection
+        behavior, behavior_func = random.choices(fidget_behaviors, weights=weights, k=1)[0]
         
         try:
             behavior_func()
@@ -504,6 +561,7 @@ class BehavioralStateMachine:
         print("Starting Behavioral State Machine with Kiosk Mode (Fidget Behaviors)...")
         print(f"Idle timeout: {self.idle_timeout}s")
         print(f"Fidget interval: {self.min_fidget_interval}-{self.max_fidget_interval}s")
+        print(f"Fidget weights: Turns={self.fidget_weights[FidgetBehavior.TURN_LEFT]:.1f}, Steps={self.fidget_weights[FidgetBehavior.STEP_FORWARD]:.1f}, Rear={self.fidget_weights[FidgetBehavior.STAND_ON_BACK_LEGS]:.1f}")
         
         # Turn on lidar initially
         self.set_lidar_state("ON")
@@ -549,12 +607,14 @@ class BehavioralStateMachine:
                 time.sleep(0.5)
                 
         except KeyboardInterrupt:
+
+            print("no power off for now...")
             # print("\n\nCtrl+C detected. Initiating POWER_OFF sequence...")
             # self.transition_to_state(RobotState.POWER_OFF)
             
             # Stand down
-            self.stand_down()
-            time.sleep(2)
+            # self.stand_down()
+            # time.sleep(2)
 
             # Release MCF mode
             # self.release_mcf_mode()
