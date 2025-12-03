@@ -8,11 +8,21 @@ During synthesis, cyan light blinks.
 Usage: 
 python dream-manager.py start
 python dream-manager.py stop
-python dream-manager.py generate-image "A photo of an astronaut riding a horse"
-python dream-manager.py generate-video "A video of an astronaut riding a horse"
+python dream-manager.py image --prompt "A photo of an astronaut riding a horse"
+python dream-manager.py video --prompt "A video of an astronaut riding a horse"
 
+# Progressive video generation (still image, then 8, 16, 32 frames)
+python dream-manager.py video --prompt "A video of an astronaut" --progressive
+
+# Custom frame progression (still image + custom stages, min 8 frames for video)
+python dream-manager.py video --prompt "A video of an astronaut" --progressive --stages 8,16,24,32,48
+
+# Batch generation
 python dream-manager.py batch-video --prompt-file prompts.txt
 python dream-manager.py batch-image --prompt-file prompts.txt
+
+# Batch progressive generation
+python dream-manager.py batch-video --prompt-file prompts.txt --progressive
 """
 import subprocess
 import time
@@ -514,6 +524,98 @@ def generate_image(
     return saved_paths
 
 
+def generate_video_progressive(
+    prompt: str,
+    output_dir: str = "outputs",
+    base_filename: str = "animation",
+    stages: Optional[List[int]] = None,
+    **kwargs
+) -> List[str]:
+    """
+    Generate videos progressively with increasing frame counts.
+    First generates a still image, then videos with 8, 16, 32 frames.
+    
+    Args:
+        prompt: The text prompt for video generation
+        output_dir: Directory to save output videos
+        base_filename: Base filename (without extension) for outputs
+        stages: List of frame counts to generate (default: [8, 16, 32])
+               Note: AnimateDiff requires minimum 8 frames
+        **kwargs: Additional parameters to pass to generate_video
+    
+    Returns:
+        List of all generated file paths (image + videos)
+    """
+    if stages is None:
+        stages = [8, 16, 32]
+    
+    all_paths = []
+    
+    # First, generate a still image (0 frames)
+    print(f"\n{'='*60}")
+    print(f"  Generating still image (0 frames)")
+    print(f"{'='*60}")
+    
+    try:
+        timestamp = int(time.time())
+        image_filename = f"{base_filename}_{timestamp}_0frames.png"
+        
+        # Extract relevant kwargs for generate_image (if any)
+        image_kwargs = {k: v for k, v in kwargs.items() 
+                       if k in ['negative_prompt', 'steps', 'sampler_name', 'scheduler', 
+                               'cfg_scale', 'seed', 'width', 'height', 'batch_size', 'styles']}
+        
+        paths = generate_image(
+            prompt=prompt,
+            output_dir=output_dir,
+            output_filename=image_filename,
+            **image_kwargs
+        )
+        all_paths.extend(paths)
+        print(f"✓ Completed still image generation")
+    except Exception as e:
+        print(f"✗ Error generating still image: {e}")
+        # Continue with video stages even if image fails
+    
+    # Then generate videos with increasing frame counts
+    for frame_count in stages:
+        print(f"\n{'='*60}")
+        print(f"  Generating {frame_count} frame(s)")
+        print(f"{'='*60}")
+        
+        # Generate filename with frame count
+        timestamp = int(time.time())
+        output_filename = f"{base_filename}_{timestamp}_{frame_count}frames.gif"
+        
+        try:
+            # Set animatediff_batch_size to match frame_count if it's smaller than default
+            # This prevents errors when frame_count < animatediff_batch_size
+            video_kwargs = kwargs.copy()
+            if 'animatediff_batch_size' not in video_kwargs:
+                # Use the smaller of frame_count or 16 (default batch size)
+                video_kwargs['animatediff_batch_size'] = min(frame_count, 16)
+            
+            paths = generate_video(
+                prompt=prompt,
+                output_dir=output_dir,
+                output_filename=output_filename,
+                video_length=frame_count,
+                **video_kwargs
+            )
+            all_paths.extend(paths)
+            print(f"✓ Completed {frame_count} frame generation")
+        except Exception as e:
+            print(f"✗ Error generating {frame_count} frames: {e}")
+            # Continue with next stage even if this one fails
+    
+    print(f"\n{'='*60}")
+    print(f"  Progressive generation complete!")
+    print(f"  Generated {len(all_paths)} file(s) total")
+    print(f"{'='*60}\n")
+    
+    return all_paths
+
+
 def generate_video(
     prompt: str,
     negative_prompt: Optional[str] = None,
@@ -783,6 +885,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--output-file", type=str, help="Output filename")
     parser.add_argument("--seed", type=int, help="Random seed")
+    parser.add_argument("--progressive", action="store_true", help="Generate progressively: still image, then videos (8, 16, 32 frames)")
+    parser.add_argument("--stages", type=str, help="Comma-separated frame counts for progressive video generation (e.g., '8,16,24,32', min 8 frames)")
     
     args = parser.parse_args()
     
@@ -839,12 +943,36 @@ if __name__ == "__main__":
             start_server()
             set_model()
         
-        generate_video(
-            prompt=prompt,
-            output_dir=args.output_dir,
-            output_filename=args.output_file or "animation.gif",
-            seed=args.seed
-        )
+        if args.progressive:
+            # Parse custom stages if provided
+            stages = None
+            if args.stages:
+                try:
+                    stages = [int(x.strip()) for x in args.stages.split(',')]
+                except ValueError:
+                    print("Error: --stages must be comma-separated integers (e.g., '1,2,4,8,16')")
+                    sys.exit(1)
+            
+            # Get base filename without extension
+            if args.output_file:
+                base_filename = os.path.splitext(args.output_file)[0]
+            else:
+                base_filename = "animation"
+            
+            generate_video_progressive(
+                prompt=prompt,
+                output_dir=args.output_dir,
+                base_filename=base_filename,
+                stages=stages,
+                seed=args.seed
+            )
+        else:
+            generate_video(
+                prompt=prompt,
+                output_dir=args.output_dir,
+                output_filename=args.output_file or "animation.gif",
+                seed=args.seed
+            )
 
     elif args.command == "batch-image":
         if not args.prompt_file:
@@ -901,6 +1029,15 @@ if __name__ == "__main__":
             start_server()
             set_model()
         
+        # Parse custom stages if provided
+        stages = None
+        if args.progressive and args.stages:
+            try:
+                stages = [int(x.strip()) for x in args.stages.split(',')]
+            except ValueError:
+                print("Error: --stages must be comma-separated integers (e.g., '1,2,4,8,16')")
+                sys.exit(1)
+        
         try:
             with open(args.prompt_file, 'r') as f:
                 prompts = [line.strip() for line in f if line.strip()]
@@ -913,16 +1050,26 @@ if __name__ == "__main__":
                 
                 print(f"\nProcessing prompt {i+1}/{len(prompts)}: {prompt}")
                 try:
-                    # Generate a unique filename for the video
+                    # Generate a unique base filename
                     timestamp = int(time.time())
-                    output_filename = f"animation_{timestamp}_{i}.gif"
+                    base_filename = f"animation_{timestamp}_{i}"
                     
-                    generate_video(
-                        prompt=prompt,
-                        output_dir=args.output_dir,
-                        output_filename=output_filename,
-                        seed=args.seed
-                    )
+                    if args.progressive:
+                        generate_video_progressive(
+                            prompt=prompt,
+                            output_dir=args.output_dir,
+                            base_filename=base_filename,
+                            stages=stages,
+                            seed=args.seed
+                        )
+                    else:
+                        output_filename = f"{base_filename}.gif"
+                        generate_video(
+                            prompt=prompt,
+                            output_dir=args.output_dir,
+                            output_filename=output_filename,
+                            seed=args.seed
+                        )
                 except Exception as e:
                     print(f"Error generating video for prompt '{prompt}': {e}")
                     # Continue with next prompt
