@@ -11,11 +11,11 @@ python dream-manager.py stop
 python dream-manager.py image --prompt "A photo of an astronaut riding a horse"
 python dream-manager.py video --prompt "A video of an astronaut riding a horse"
 
-# Progressive video generation (still image, then 8, 16, 32 frames)
+# Progressive video generation (still image, then 16, 32 frames)
 python dream-manager.py video --prompt "A video of an astronaut" --progressive
 
 # Custom frame progression (still image + custom stages, min 8 frames for video)
-python dream-manager.py video --prompt "A video of an astronaut" --progressive --stages 8,16,24,32,48
+python dream-manager.py video --prompt "A video of an astronaut" --progressive --stages 16,32,48,64
 
 # Batch generation
 python dream-manager.py batch-video --prompt-file prompts.txt
@@ -33,6 +33,7 @@ import signal
 import sys
 import json
 import threading
+import random
 from typing import Optional, Dict, Any, List
 
 # Robot control imports
@@ -529,27 +530,39 @@ def generate_video_progressive(
     output_dir: str = "outputs",
     base_filename: str = "animation",
     stages: Optional[List[int]] = None,
+    seed: Optional[int] = None,
     **kwargs
 ) -> List[str]:
     """
     Generate videos progressively with increasing frame counts.
-    First generates a still image, then videos with 8, 16, 32 frames.
+    First generates a still image, then videos with 16, 32 frames.
+    Uses the same random seed for all stages for consistency.
     
     Args:
         prompt: The text prompt for video generation
         output_dir: Directory to save output videos
         base_filename: Base filename (without extension) for outputs
-        stages: List of frame counts to generate (default: [8, 16, 32])
+        stages: List of frame counts to generate (default: [16, 32])
                Note: AnimateDiff requires minimum 8 frames
+        seed: Random seed to use for all stages (None = random)
         **kwargs: Additional parameters to pass to generate_video
     
     Returns:
         List of all generated file paths (image + videos)
     """
     if stages is None:
-        stages = [8, 16, 32]
+        stages = [16, 32]
+    
+    # Generate a random seed if not provided, use it for all stages
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    
+    print(f"\n{'='*60}")
+    print(f"  Using seed: {seed} for all stages")
+    print(f"{'='*60}")
     
     all_paths = []
+    timestamp = int(time.time())
     
     # First, generate a still image (0 frames)
     print(f"\n{'='*60}")
@@ -557,18 +570,18 @@ def generate_video_progressive(
     print(f"{'='*60}")
     
     try:
-        timestamp = int(time.time())
-        image_filename = f"{base_filename}_{timestamp}_0frames.png"
+        image_filename = f"{base_filename}_seed_{seed}_{timestamp}_0frames.png"
         
         # Extract relevant kwargs for generate_image (if any)
         image_kwargs = {k: v for k, v in kwargs.items() 
                        if k in ['negative_prompt', 'steps', 'sampler_name', 'scheduler', 
-                               'cfg_scale', 'seed', 'width', 'height', 'batch_size', 'styles']}
+                               'cfg_scale', 'width', 'height', 'batch_size', 'styles']}
         
         paths = generate_image(
             prompt=prompt,
             output_dir=output_dir,
             output_filename=image_filename,
+            seed=seed,
             **image_kwargs
         )
         all_paths.extend(paths)
@@ -583,9 +596,8 @@ def generate_video_progressive(
         print(f"  Generating {frame_count} frame(s)")
         print(f"{'='*60}")
         
-        # Generate filename with frame count
-        timestamp = int(time.time())
-        output_filename = f"{base_filename}_{timestamp}_{frame_count}frames.gif"
+        # Generate filename with frame count and seed
+        output_filename = f"{base_filename}_seed_{seed}_{timestamp}_{frame_count}frames.gif"
         
         try:
             # Set animatediff_batch_size to match frame_count if it's smaller than default
@@ -600,6 +612,7 @@ def generate_video_progressive(
                 output_dir=output_dir,
                 output_filename=output_filename,
                 video_length=frame_count,
+                seed=seed,
                 **video_kwargs
             )
             all_paths.extend(paths)
@@ -611,6 +624,7 @@ def generate_video_progressive(
     print(f"\n{'='*60}")
     print(f"  Progressive generation complete!")
     print(f"  Generated {len(all_paths)} file(s) total")
+    print(f"  Seed used: {seed}")
     print(f"{'='*60}\n")
     
     return all_paths
@@ -885,8 +899,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--output-file", type=str, help="Output filename")
     parser.add_argument("--seed", type=int, help="Random seed")
-    parser.add_argument("--progressive", action="store_true", help="Generate progressively: still image, then videos (8, 16, 32 frames)")
-    parser.add_argument("--stages", type=str, help="Comma-separated frame counts for progressive video generation (e.g., '8,16,24,32', min 8 frames)")
+    parser.add_argument("--progressive", action="store_true", help="Generate progressively: still image, then videos (16, 32 frames)")
+    parser.add_argument("--stages", type=str, help="Comma-separated frame counts for progressive video generation (e.g., '16,32,48,64', min 8 frames)")
     
     args = parser.parse_args()
     
