@@ -484,12 +484,20 @@ def serve_dream(index):
         if dream_path.lower().endswith('.jpg') or dream_path.lower().endswith('.jpeg'):
             mime_type = 'image/jpeg'
         elif dream_path.lower().endswith('.gif'):
+            # Check for speed parameter
+            speed = request.args.get('speed', type=float)
+            if speed and speed > 0 and speed != 1.0:
+                return stream_gif_with_speed(dream_path, speed)
             mime_type = 'image/gif'
         elif dream_path.lower().endswith('.webp'):
             mime_type = 'image/webp'
     else:  # video
         mime_type = 'video/mp4'
         if dream_path.lower().endswith('.gif'):
+             # Check for speed parameter
+            speed = request.args.get('speed', type=float)
+            if speed and speed > 0 and speed != 1.0:
+                return stream_gif_with_speed(dream_path, speed)
             mime_type = 'image/gif'
         elif dream_path.lower().endswith('.webm'):
             mime_type = 'video/webm'
@@ -497,6 +505,45 @@ def serve_dream(index):
             mime_type = 'video/quicktime'
     
     return send_file(dream_path, mimetype=mime_type)
+
+
+def stream_gif_with_speed(gif_path, speed):
+    """Stream a GIF as MJPEG with modified playback speed."""
+    def generate():
+        cap = cv2.VideoCapture(gif_path)
+        if not cap.isOpened():
+            return
+
+        # Get original FPS, default to 10 if not available
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 10.0
+        
+        # Calculate delay for the target speed
+        # Original delay = 1/fps
+        # New delay = Original delay / speed
+        delay = (1.0 / fps) / speed
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                # Loop the GIF
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            
+            # Encode frame as JPEG
+            ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ret:
+                continue
+            
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            
+            time.sleep(delay)
+
+    return Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 def main():
