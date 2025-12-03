@@ -23,6 +23,10 @@ python dream-manager.py batch-image --prompt-file prompts.txt
 
 # Batch progressive generation
 python dream-manager.py batch-video --prompt-file prompts.txt --progressive
+
+# Regenerate from metadata (automatically detects image or video)
+python dream-manager.py regenerate --metadata-file outputs/generated_1234567890_0_metadata.json
+python dream-manager.py regenerate --metadata-file outputs/animation_seed_123_timestamp_32frames_metadata.json
 """
 import subprocess
 import time
@@ -35,6 +39,7 @@ import json
 import threading
 import random
 from typing import Optional, Dict, Any, List
+from dotenv import load_dotenv
 
 # Robot control imports
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
@@ -45,12 +50,22 @@ from unitree_sdk2py.rpc.client import Client
 
 ROBOT_CONTROL_AVAILABLE = True
 
+# Load environment variables from .env
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+
 # Configuration
 DOCKER_IMAGE = "daivdl487/stable-diffusion-webui:r36.4.3"
 CONTAINER_NAME = "stable-diffusion-webui"
 SERVER = "http://127.0.0.1:7860"
 MODEL_CHECKPOINT = "Realistic_Vision_V5.1_fp16-no-ema.safetensors"
 ETHERNET_INTERFACE = "enP8p1s0"  # Robot ethernet interface
+
+# Image/Video generation parameters from environment
+DEFAULT_WIDTH = int(os.getenv('WIDTH', '256'))
+DEFAULT_HEIGHT = int(os.getenv('HEIGHT', '256'))
+DEFAULT_STEPS = int(os.getenv('STEPS', '20'))
+DEFAULT_FPS = int(os.getenv('FPS', '8'))
+DEFAULT_FRAMES = int(os.getenv('FRAMES', '32'))
 
 # Global state
 _container_id: Optional[str] = None
@@ -418,13 +433,13 @@ def ensure_robot_dreaming_state() -> None:
 def generate_image(
     prompt: str,
     negative_prompt: Optional[str] = None,
-    steps: int = 20,
+    steps: Optional[int] = None,
     sampler_name: str = "DPM++ 2M",
     scheduler: str = "Karras",
     cfg_scale: float = 7,
     seed: Optional[int] = None,
-    width: int = 256,
-    height: int = 256,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
     batch_size: int = 1,
     styles: Optional[List[str]] = None,
     output_dir: str = "outputs",
@@ -437,13 +452,13 @@ def generate_image(
     Args:
         prompt: The text prompt for image generation
         negative_prompt: Negative prompt (default: standard negative prompt)
-        steps: Number of inference steps
+        steps: Number of inference steps (None to use .env default)
         sampler_name: Sampler to use
         scheduler: Scheduler type
         cfg_scale: Guidance scale
         seed: Random seed (None for random)
-        width: Image width
-        height: Image height
+        width: Image width (None to use .env default)
+        height: Image height (None to use .env default)
         batch_size: Number of images to generate
         styles: List of style names
         output_dir: Directory to save output images
@@ -453,6 +468,14 @@ def generate_image(
     Returns:
         List of file paths to generated images
     """
+    # Use defaults from environment if not specified
+    if width is None:
+        width = DEFAULT_WIDTH
+    if height is None:
+        height = DEFAULT_HEIGHT
+    if steps is None:
+        steps = DEFAULT_STEPS
+    
     if negative_prompt is None:
         negative_prompt = (
             "painting, drawing, illustration, glitch, deformed, mutated, "
@@ -501,6 +524,35 @@ def generate_image(
     
     os.makedirs(output_dir, exist_ok=True)
     
+    # Extract the actual seed used from the result (if available in info)
+    actual_seed = seed
+    if "info" in result:
+        try:
+            info = json.loads(result["info"]) if isinstance(result["info"], str) else result["info"]
+            if "seed" in info:
+                actual_seed = info["seed"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    
+    # Prepare metadata for saving
+    metadata = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": steps,
+        "sampler_name": sampler_name,
+        "scheduler": scheduler,
+        "cfg_scale": cfg_scale,
+        "seed": actual_seed,
+        "width": width,
+        "height": height,
+        "batch_size": batch_size,
+        "styles": styles,
+        "timestamp": int(time.time()),
+        "model_checkpoint": MODEL_CHECKPOINT,
+        "generation_type": "image",
+        **{k: v for k, v in kwargs.items() if k != "alwayson_scripts"}  # Exclude complex nested objects
+    }
+    
     saved_paths = []
     for i, img_b64 in enumerate(result.get("images", [])):
         # Decode base64 image
@@ -521,8 +573,153 @@ def generate_image(
             f.write(img_data)
         saved_paths.append(out_path)
         print(f"Saved: {out_path}")
+        
+        # Save metadata as JSON file
+        stem, _ = os.path.splitext(out_name)
+        metadata_path = os.path.join(output_dir, f"{stem}_metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Saved metadata: {metadata_path}")
     
     return saved_paths
+
+
+def regenerate_image_from_metadata(metadata_path: str, output_dir: Optional[str] = None) -> List[str]:
+    """
+    Regenerate an image from a saved metadata JSON file.
+    
+    Args:
+        metadata_path: Path to the metadata JSON file
+        output_dir: Optional output directory override (uses metadata if not specified)
+    
+    Returns:
+        List of file paths to regenerated images
+    """
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+    
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    
+    # Extract parameters from metadata
+    prompt = metadata.get("prompt")
+    negative_prompt = metadata.get("negative_prompt")
+    steps = metadata.get("steps")
+    sampler_name = metadata.get("sampler_name", "DPM++ 2M")
+    scheduler = metadata.get("scheduler", "Karras")
+    cfg_scale = metadata.get("cfg_scale", 7)
+    seed = metadata.get("seed")
+    width = metadata.get("width")
+    height = metadata.get("height")
+    batch_size = metadata.get("batch_size", 1)
+    styles = metadata.get("styles", [])
+    
+    # Use specified output_dir or default to "outputs"
+    if output_dir is None:
+        output_dir = "outputs"
+    
+    # Generate new filename with timestamp
+    timestamp = int(time.time())
+    output_filename = f"regenerated_{timestamp}.png"
+    
+    print(f"Regenerating image from metadata: {metadata_path}")
+    print(f"  Prompt: {prompt}")
+    print(f"  Seed: {seed}")
+    print(f"  Dimensions: {width}x{height}")
+    print(f"  Steps: {steps}")
+    
+    # Call generate_image with the saved parameters
+    return generate_image(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        steps=steps,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
+        cfg_scale=cfg_scale,
+        seed=seed,
+        width=width,
+        height=height,
+        batch_size=batch_size,
+        styles=styles,
+        output_dir=output_dir,
+        output_filename=output_filename
+    )
+
+
+def regenerate_video_from_metadata(metadata_path: str, output_dir: Optional[str] = None) -> List[str]:
+    """
+    Regenerate a video from a saved metadata JSON file.
+    
+    Args:
+        metadata_path: Path to the metadata JSON file
+        output_dir: Optional output directory override (uses metadata if not specified)
+    
+    Returns:
+        List of file paths to regenerated videos
+    """
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+    
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    
+    # Extract parameters from metadata
+    prompt = metadata.get("prompt")
+    negative_prompt = metadata.get("negative_prompt")
+    steps = metadata.get("steps")
+    sampler_name = metadata.get("sampler_name", "DPM++ 2M Karras")
+    cfg_scale = metadata.get("cfg_scale", 7)
+    seed = metadata.get("seed")
+    width = metadata.get("width")
+    height = metadata.get("height")
+    batch_size = metadata.get("batch_size", 1)
+    styles = metadata.get("styles", [])
+    video_length = metadata.get("video_length", 32)
+    fps = metadata.get("fps", 8)
+    loop_number = metadata.get("loop_number", 0)
+    motion_model = metadata.get("motion_model", "mm_sd15_v3.safetensors")
+    animatediff_batch_size = metadata.get("animatediff_batch_size", 16)
+    stride = metadata.get("stride", 1)
+    overlap = metadata.get("overlap", 4)
+    
+    # Use specified output_dir or default to "outputs"
+    if output_dir is None:
+        output_dir = "outputs"
+    
+    # Generate new filename with timestamp
+    timestamp = int(time.time())
+    output_filename = f"regenerated_{timestamp}.gif"
+    
+    print(f"Regenerating video from metadata: {metadata_path}")
+    print(f"  Prompt: {prompt}")
+    print(f"  Seed: {seed}")
+    print(f"  Dimensions: {width}x{height}")
+    print(f"  Steps: {steps}")
+    print(f"  Frames: {video_length}")
+    print(f"  FPS: {fps}")
+    
+    # Call generate_video with the saved parameters
+    return generate_video(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        steps=steps,
+        sampler_name=sampler_name,
+        cfg_scale=cfg_scale,
+        seed=seed,
+        width=width,
+        height=height,
+        batch_size=batch_size,
+        styles=styles,
+        output_dir=output_dir,
+        output_filename=output_filename,
+        video_length=video_length,
+        fps=fps,
+        loop_number=loop_number,
+        motion_model=motion_model,
+        animatediff_batch_size=animatediff_batch_size,
+        stride=stride,
+        overlap=overlap
+    )
 
 
 def generate_video_progressive(
@@ -633,18 +830,18 @@ def generate_video_progressive(
 def generate_video(
     prompt: str,
     negative_prompt: Optional[str] = None,
-    steps: int = 20,
+    steps: Optional[int] = None,
     sampler_name: str = "DPM++ 2M Karras",
     cfg_scale: float = 7,
     seed: Optional[int] = None,
-    width: int = 256,
-    height: int = 256,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
     batch_size: int = 1,
     styles: Optional[List[str]] = None,
     output_dir: str = "outputs",
     output_filename: str = "animation.gif",
-    video_length: int = 32,
-    fps: int = 8,
+    video_length: Optional[int] = None,
+    fps: Optional[int] = None,
     loop_number: int = 0,
     motion_model: str = "mm_sd15_v3.safetensors",
     animatediff_batch_size: int = 16,
@@ -654,22 +851,24 @@ def generate_video(
 ) -> List[str]:
     """
     Generate a video/animation using AnimateDiff.
+    First generates a still image (0 frames) with metadata, then generates the video.
+    Uses the same seed for both image and video for consistency.
     
     Args:
         prompt: The text prompt for video generation
         negative_prompt: Negative prompt (default: standard negative prompt)
-        steps: Number of inference steps
+        steps: Number of inference steps (None to use .env default)
         sampler_name: Sampler to use
         cfg_scale: Guidance scale
-        seed: Random seed (None for random)
-        width: Video width
-        height: Video height
+        seed: Random seed (None for random, same seed used for image and video)
+        width: Video width (None to use .env default)
+        height: Video height (None to use .env default)
         batch_size: Number of videos to generate
         styles: List of style names
         output_dir: Directory to save output videos
         output_filename: Filename for output
-        video_length: Number of frames
-        fps: Frames per second
+        video_length: Number of frames (None to use .env default)
+        fps: Frames per second (None to use .env default)
         loop_number: Loop number (0 = infinite loop)
         motion_model: AnimateDiff motion module
         animatediff_batch_size: Batch size for AnimateDiff
@@ -678,8 +877,24 @@ def generate_video(
         **kwargs: Additional parameters to pass to the API
     
     Returns:
-        List of file paths to generated videos
+        List of file paths to generated images and videos (image first, then videos)
     """
+    # Use defaults from environment if not specified
+    if width is None:
+        width = DEFAULT_WIDTH
+    if height is None:
+        height = DEFAULT_HEIGHT
+    if steps is None:
+        steps = DEFAULT_STEPS
+    if fps is None:
+        fps = DEFAULT_FPS
+    if video_length is None:
+        video_length = DEFAULT_FRAMES
+    
+    # Generate seed if not provided (for consistency between image and video)
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    
     if negative_prompt is None:
         negative_prompt = (
             "painting, drawing, illustration, glitch, deformed, mutated, "
@@ -688,6 +903,45 @@ def generate_video(
     
     if styles is None:
         styles = []
+    
+    # Extract base filename for consistent naming
+    timestamp = int(time.time())
+    if output_filename == "animation.gif":
+        base_filename = "animation"
+    else:
+        # Extract base name from custom filename (remove extension)
+        base_filename = os.path.splitext(output_filename)[0]
+    
+    # First, generate a still image (0 frames) with metadata
+    print(f"\n{'='*60}")
+    print(f"  Generating still image (0 frames)")
+    print(f"{'='*60}")
+    
+    image_paths = []
+    try:
+        image_filename = f"{base_filename}_seed_{seed}_{timestamp}_0frames.png"
+        
+        # Extract relevant kwargs for generate_image
+        image_kwargs = {k: v for k, v in kwargs.items() 
+                       if k in ['negative_prompt', 'steps', 'sampler_name', 'scheduler', 
+                               'cfg_scale', 'width', 'height', 'batch_size', 'styles']}
+        
+        image_paths = generate_image(
+            prompt=prompt,
+            output_dir=output_dir,
+            output_filename=image_filename,
+            seed=seed,
+            **image_kwargs
+        )
+        print(f"✓ Completed still image generation")
+    except Exception as e:
+        print(f"✗ Error generating still image: {e}")
+        # Continue with video generation even if image fails
+    
+    # Now generate the video
+    print(f"\n{'='*60}")
+    print(f"  Generating {video_length} frame(s)")
+    print(f"{'='*60}")
     
     payload = {
         "prompt": prompt,
@@ -722,9 +976,8 @@ def generate_video(
         **kwargs
     }
     
-    # Add seed if provided
-    if seed is not None:
-        payload["seed"] = seed
+    # Add seed to payload
+    payload["seed"] = seed
     
     # Ensure robot is in dreaming state before synthesis (lying down, lidar off, cyan solid)
     ensure_robot_dreaming_state()
@@ -744,6 +997,44 @@ def generate_video(
     
     os.makedirs(output_dir, exist_ok=True)
     
+    # Extract the actual seed used from the result (if available in info)
+    actual_seed = seed
+    if "info" in result:
+        try:
+            info = json.loads(result["info"]) if isinstance(result["info"], str) else result["info"]
+            if "seed" in info:
+                actual_seed = info["seed"]
+        except (json.JSONDecodeError, KeyError):
+            pass
+    
+    # Generate filename with seed, timestamp, and frame count if using default filename
+    if output_filename == "animation.gif":
+        output_filename = f"{base_filename}_seed_{actual_seed}_{timestamp}_{video_length}frames.gif"
+    
+    # Prepare metadata for saving
+    metadata = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "steps": steps,
+        "sampler_name": sampler_name,
+        "cfg_scale": cfg_scale,
+        "seed": actual_seed,
+        "width": width,
+        "height": height,
+        "batch_size": batch_size,
+        "styles": styles,
+        "video_length": video_length,
+        "fps": fps,
+        "loop_number": loop_number,
+        "motion_model": motion_model,
+        "animatediff_batch_size": animatediff_batch_size,
+        "stride": stride,
+        "overlap": overlap,
+        "timestamp": timestamp,
+        "model_checkpoint": MODEL_CHECKPOINT,
+        "generation_type": "video"
+    }
+    
     saved_paths = []
     for i, item in enumerate(result.get("images", [])):
         b64 = item.split(",", 1)[-1]
@@ -760,8 +1051,17 @@ def generate_video(
             f.write(data)
         saved_paths.append(out_path)
         print(f"Saved animation: {out_path}")
+        
+        # Save metadata as JSON file
+        stem, _ = os.path.splitext(out_name)
+        metadata_path = os.path.join(output_dir, f"{stem}_metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"Saved metadata: {metadata_path}")
     
-    return saved_paths
+    # Return both image and video paths
+    all_paths = image_paths + saved_paths
+    return all_paths
 
 
 def stop_container(remove: bool = True) -> None:
@@ -891,10 +1191,11 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Manage Stable Diffusion WebUI Docker container")
-    parser.add_argument("command", choices=["start", "stop", "status", "image", "video", "batch-image", "batch-video"],
+    parser.add_argument("command", choices=["start", "stop", "status", "image", "video", "batch-image", "batch-video", "regenerate"],
                         help="Command to execute")
     parser.add_argument("--prompt", type=str, help="Prompt for generation")
     parser.add_argument("--prompt-file", type=str, help="File containing prompts for batch generation")
+    parser.add_argument("--metadata-file", type=str, help="Metadata JSON file for regeneration")
     parser.add_argument("--append-style", type=str, help="Style string to append to all prompts")
     parser.add_argument("--output-dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--output-file", type=str, help="Output filename")
@@ -1090,4 +1391,41 @@ if __name__ == "__main__":
                     
         except Exception as e:
             print(f"Error reading prompt file: {e}")
+            sys.exit(1)
+
+    elif args.command == "regenerate":
+        if not args.metadata_file:
+            print("Error: --metadata-file is required for regenerate command")
+            sys.exit(1)
+        
+        if not os.path.exists(args.metadata_file):
+            print(f"Error: Metadata file '{args.metadata_file}' not found")
+            sys.exit(1)
+        
+        if not is_server_running():
+            print("Server not running. Starting server...")
+            start_server()
+            set_model()
+        
+        try:
+            # Read metadata to determine if it's an image or video
+            with open(args.metadata_file, 'r') as f:
+                metadata = json.load(f)
+            
+            generation_type = metadata.get("generation_type", "image")
+            
+            if generation_type == "video":
+                print("Detected video metadata, regenerating video...")
+                regenerate_video_from_metadata(
+                    metadata_path=args.metadata_file,
+                    output_dir=args.output_dir
+                )
+            else:
+                print("Detected image metadata, regenerating image...")
+                regenerate_image_from_metadata(
+                    metadata_path=args.metadata_file,
+                    output_dir=args.output_dir
+                )
+        except Exception as e:
+            print(f"Error regenerating from metadata: {e}")
             sys.exit(1)
