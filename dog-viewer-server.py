@@ -57,7 +57,7 @@ SUBTITLES = {
     7: "Structured as a metalogue, it blends dialogue with rich multi-modal imagery",
     8: "drawn from a range of human and machine perspectives.",
     9: "Working with LIDAR scans, 360° video, gaussian splats",
-    10: "and snapshots of internal internal model states",
+    10: "and snapshots of internal model states",
     11: "The film constructs a hybrid cinematic language",
     12: "that toggles between perception and affect, embodiment, computation, and language.",
     13: "As the collaborators exchange and evolve the AI's mind",
@@ -112,14 +112,14 @@ HTML_TEMPLATE = """
         }
         .subtitle-overlay {
             position: fixed;
-            bottom: 80px;
+            bottom: 40px;
             left: 50%;
             transform: translateX(-50%);
-            width: 70%;
-            max-width: 1200px;
+            width: 50%;
+            max-width: 50%;
             text-align: left;
             color: #FFD700;
-            font-size: 48px;
+            font-size: 40px;
             font-family: Arial, sans-serif;
             text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.9);
             z-index: 1000;
