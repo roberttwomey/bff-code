@@ -1,3 +1,20 @@
+"""
+Human Following Robot Controller
+
+Video Output Configuration (via .env file):
+    VIDEO_OUTPUT=display    - Local window using cv2.imshow (default)
+    VIDEO_OUTPUT=mjpeg      - Remote MJPEG streaming (view in browser)
+    
+    VIDEO_STREAM_PORT=8080  - Port for MJPEG streaming (default: 8080)
+    
+    UNITREE_GO2_IP=192.168.4.30  - Robot IP address
+
+Example .env:
+    VIDEO_OUTPUT=mjpeg
+    VIDEO_STREAM_PORT=8080
+    UNITREE_GO2_IP=192.168.4.30
+"""
+
 import cv2
 import numpy as np
 import asyncio
@@ -12,6 +29,14 @@ from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
 from aiortc import MediaStreamTrack
 from ultralytics import YOLO
 import json
+
+# Optional streaming support
+try:
+    from streaming_utils import MJPEGStreamer, RTSPStreamer
+    STREAMING_AVAILABLE = True
+except ImportError:
+    STREAMING_AVAILABLE = False
+    print("Note: streaming_utils not available. Install Flask for web streaming.")
 
 # Load environment variables from .env file
 load_dotenv()
@@ -34,13 +59,56 @@ class HumanFollower:
     - Continuous forward movement even when close to humans
     - High-speed control loop (20Hz) for smooth operation
     """
-    def __init__(self, ip=None):
+    def __init__(self, ip=None, stream_mode=None, stream_port=None):
+        """
+        Initialize HumanFollower
+        
+        Args:
+            ip: Robot IP address (overrides .env)
+            stream_mode: 'display' (cv2.imshow) or 'mjpeg' (HTTP stream) (overrides .env)
+            stream_port: Port for MJPEG streaming (overrides .env)
+        """
         # Read IP from environment variable, fallback to provided ip or default
         self.ip = ip or os.getenv('UNITREE_GO2_IP', '192.168.4.30')
         self.frame_queue = Queue()
         self.conn = None
         self.loop = None
         self.asyncio_thread = None
+        
+        # Streaming setup - read from .env if not provided
+        # VIDEO_OUTPUT can be 'display' (local window) or 'mjpeg' (remote streaming)
+        env_video_output = os.getenv('VIDEO_OUTPUT', 'display').lower()
+        self.stream_mode = stream_mode or env_video_output
+        
+        # Validate stream_mode
+        if self.stream_mode not in ['display', 'mjpeg']:
+            print(f"Warning: Invalid VIDEO_OUTPUT '{self.stream_mode}', defaulting to 'display'")
+            self.stream_mode = 'display'
+        
+        # Read port from .env if not provided
+        env_port = os.getenv('VIDEO_STREAM_PORT', '8080')
+        try:
+            self.stream_port = stream_port or int(env_port)
+        except ValueError:
+            print(f"Warning: Invalid VIDEO_STREAM_PORT '{env_port}', using default 8080")
+            self.stream_port = 8080
+        
+        self.streamer = None
+        
+        # Initialize streaming based on mode
+        if self.stream_mode == 'mjpeg':
+            if STREAMING_AVAILABLE:
+                self.streamer = MJPEGStreamer(port=self.stream_port)
+                self.streamer.start()
+                print(f"Video output: MJPEG streaming at http://localhost:{self.stream_port}")
+                print(f"  View in browser: http://localhost:{self.stream_port}")
+            else:
+                print("Warning: MJPEG streaming requested but Flask not available.")
+                print("  Install Flask: pip install flask")
+                print("  Falling back to local display mode.")
+                self.stream_mode = 'display'
+        elif self.stream_mode == 'display':
+            print("Video output: Local window (cv2.imshow)")
         
         # Load YOLO model for human detection
         self.model = YOLO('yolov8n.pt')  # Using nano model for speed
@@ -378,10 +446,14 @@ class HumanFollower:
                             self.current_movement = {'x': 0, 'y': 0, 'z': 0}
                             print("No humans detected, stopped moving")
                     
-                    # Display the frame
-                    cv2.imshow('Human Following', frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+                    # Display or stream the frame
+                    if self.stream_mode == 'display':
+                        cv2.imshow('Human Following', frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
+                    elif self.stream_mode == 'mjpeg' and self.streamer:
+                        # Stream the frame via MJPEG
+                        self.streamer.update_frame(frame)
                 else:
                     await asyncio.sleep(0.01)
                     
@@ -397,7 +469,10 @@ class HumanFollower:
                     pass
             
             await self.stop_robot()
-            cv2.destroyAllWindows()
+            if self.stream_mode == 'display':
+                cv2.destroyAllWindows()
+            if self.streamer:
+                self.streamer.stop()
             self.is_following = False
             
             # Stop the asyncio event loop
@@ -412,29 +487,35 @@ class HumanFollower:
             await self.start_following()
 
 async def main():
-    follower = HumanFollower()
+    # Video output mode is read from .env file:
+    # VIDEO_OUTPUT=display  -> Local window (cv2.imshow)
+    # VIDEO_OUTPUT=mjpeg    -> Remote streaming (HTTP, view in browser)
+    # VIDEO_STREAM_PORT=8080 -> Port for MJPEG streaming (default: 8080)
+    
+    follower = HumanFollower()  # Settings read from .env
     
     # Ask user if they want to test movement first
-    print("Human Following Robot")
-    print("====================")
-    print("1. Test robot movement first")
-    print("2. Start human following directly")
+    # print("\n1. Test robot movement first")
+    # print("2. Start human following directly")
     
     try:
-        choice = input("Enter your choice (1 or 2): ").strip()
+        # choice = input("Enter your choice (1 or 2): ").strip()
         
-        if choice == "1":
-            print("\nTesting robot movement...")
-            if await follower.connect():
-                await follower.test_movement()
-                print("\nMovement test completed. Starting human following...")
-                await follower.start_following()
-        elif choice == "2":
-            print("\nStarting human following...")
-            await follower.run()
-        else:
-            print("Invalid choice. Starting human following...")
-            await follower.run()
+        # if choice == "1":
+        #     print("\nTesting robot movement...")
+        #     if await follower.connect():
+        #         await follower.test_movement()
+        #         print("\nMovement test completed. Starting human following...")
+        #         await follower.start_following()
+        # elif choice == "2":
+        #     print("\nStarting human following...")
+        #     await follower.run()
+        # else:
+        #     print("Invalid choice. Starting human following...")
+        #     await follower.run()
+
+        print("Starting human following...")
+        await follower.run()
             
     except KeyboardInterrupt:
         print("\nProgram interrupted by user")
