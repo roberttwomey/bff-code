@@ -4,12 +4,17 @@ import asyncio
 import logging
 import threading
 import time
+import os
 from queue import Queue
-from go2_webrtc_driver.webrtc_driver import Go2WebRTCConnection, WebRTCConnectionMethod
-from go2_webrtc_driver.constants import RTC_TOPIC, SPORT_CMD
+from dotenv import load_dotenv
+from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod
+from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
 from aiortc import MediaStreamTrack
 from ultralytics import YOLO
 import json
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Enable logging for debugging
 logging.basicConfig(level=logging.FATAL)
@@ -29,8 +34,9 @@ class HumanFollower:
     - Continuous forward movement even when close to humans
     - High-speed control loop (20Hz) for smooth operation
     """
-    def __init__(self, ip="192.168.4.30"):
-        self.ip = ip
+    def __init__(self, ip=None):
+        # Read IP from environment variable, fallback to provided ip or default
+        self.ip = ip or os.getenv('UNITREE_GO2_IP', '192.168.4.30')
         self.frame_queue = Queue()
         self.conn = None
         self.loop = None
@@ -63,7 +69,7 @@ class HumanFollower:
     async def connect(self):
         """Connect to the Go2 robot"""
         try:
-            self.conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=self.ip)
+            self.conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=self.ip)
             await self.conn.connect()
             print("Connected to Go2 robot")
             
