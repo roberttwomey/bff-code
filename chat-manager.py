@@ -51,7 +51,7 @@ import numpy as np
 import ollama
 import sounddevice as sd
 import soundfile as sf
-import whisper
+from faster_whisper import WhisperModel
 import torch
 import dotenv
 
@@ -95,7 +95,6 @@ DEFAULT_SYSTEM_PROMPT = (
     )
 )
 
-# DEFAULT_OLLAMA_MODEL = os.environ.get("BFF_OLLAMA_MODEL", "gemma3n:e4b")
 DEFAULT_OLLAMA_MODEL = os.environ.get("BFF_OLLAMA_MODEL", "gemma3n:e2b")
 DEFAULT_WHISPER_MODEL = os.environ.get("BFF_WHISPER_MODEL", "tiny")
 DEFAULT_SAMPLE_RATE = int(os.environ.get("BFF_SAMPLE_RATE", "16000"))
@@ -113,13 +112,13 @@ LOG_ROOT = Path(os.environ.get("BFF_LOG_ROOT", Path.home() / "bff" / "logs")).ex
 LAST_HEADSET_MAC = os.environ.get("LAST_HEADSET_MAC")
 LAST_HEADSET_NAME = os.environ.get("LAST_HEADSET_NAME")
 
-
 @dataclass
 class ConversationConfig:
     """Runtime configuration for the voice chat assistant."""
 
     ollama_model: str = DEFAULT_OLLAMA_MODEL
     whisper_model: str = DEFAULT_WHISPER_MODEL
+    whisper_compute_type: str = "int8"  # optimized for Jetson
     piper_voice: Path | None = None
     piper_config: Path | None = None
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -150,6 +149,11 @@ def parse_args() -> ConversationConfig:
         "--whisper-model",
         default=DEFAULT_WHISPER_MODEL,
         help="Whisper model size to load (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--whisper-compute-type",
+        default="int8",
+        help="Quantization type for Whisper (default: int8, options: float16, int8_float16, int8)",
     )
     parser.add_argument(
         "--piper-voice",
@@ -260,6 +264,7 @@ def parse_args() -> ConversationConfig:
     return ConversationConfig(
         ollama_model=args.ollama_model,
         whisper_model=args.whisper_model,
+        whisper_compute_type=args.whisper_compute_type,
         piper_voice=args.piper_voice,
         piper_config=args.piper_config,
         system_prompt=args.system_prompt,
@@ -279,14 +284,10 @@ def parse_args() -> ConversationConfig:
     )
 
 
-def load_whisper_model(name: str) -> whisper.Whisper:
-    # print(f"Loading Whisper model '{name}'…", file=sys.stderr)
+def load_whisper_model(name: str, compute_type: str = "int8") -> WhisperModel:
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # if device == "cuda":
-    #     print("CUDA available; loading Whisper on GPU.", file=sys.stderr)
-    # else:
-    #     print("CUDA not available; falling back to CPU.", file=sys.stderr)
-    return whisper.load_model(name, device=device)
+    print(f"Loading Faster Whisper model '{name}' on {device} ({compute_type})…", file=sys.stderr)
+    return WhisperModel(name, device=device, compute_type=compute_type)
 
 
 def resolve_piper_config_path(model_path: Path, config_path: Path | None) -> Path:
@@ -772,197 +773,134 @@ def phrase_stream(
 
 
 
-def transcribe_audio(model: whisper.Whisper, audio_path: Path, show_levels: bool) -> str:
-    print("Transcribing with Whisper…", file=sys.stderr)
+def transcribe_audio(model: WhisperModel, audio_path: Path, show_levels: bool) -> str:
+    print("Transcribing with Faster Whisper…", file=sys.stderr)
     start_time = time.perf_counter()
-    # Optimize for speed: use fp16 if CUDA available, beam_size=1 for faster decoding
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_fp16 = device == "cuda"
-    result = model.transcribe(
+    
+    segments, info = model.transcribe(
         str(audio_path),
-        fp16=use_fp16,
-        beam_size=1,  # Faster decoding (default is 5)
-        best_of=1,    # Don't try multiple candidates
-        temperature=0,  # Deterministic, faster
+        beam_size=1,  # Greedy decoding for speed
+        temperature=0,
     )
+    
+    # faster-whisper returns a generator, so we must iterate to get results
+    text_segments = []
+    for segment in segments:
+        text_segments.append(segment.text)
+        
+    text = " ".join(text_segments).strip()
+    
     end_time = time.perf_counter()
     duration = end_time - start_time
     # print(f"Whisper transcription completed in {duration:.2f} seconds", file=sys.stderr)
-    text = result.get("text", "").strip()
     meter_break(show_levels)
     print(f"You said: {text}")
     return text
 
 
-def query_ollama(
+class SentenceAccumulator:
+    """Accumulates text chunks and yields complete sentences."""
+    def __init__(self):
+        self.buffer = ""
+        # Simple sentence endings. Can be improved with nltk/spacy if needed,
+        # but kept simple for speed and dependency minimization.
+        self.endings = {'.', '!', '?', ':'}
+        
+    def add(self, text: str) -> Iterable[str]:
+        self.buffer += text
+        while True:
+            # Find the first sentence ending
+            earliest_end = -1
+            best_mark = None
+            
+            for mark in self.endings:
+                idx = self.buffer.find(mark)
+                if idx != -1:
+                    if earliest_end == -1 or idx < earliest_end:
+                        earliest_end = idx
+                        best_mark = mark
+            
+            if earliest_end == -1:
+                break
+                
+            # We found a sentence end. 
+            # Check if it looks like an abbreviation (e.g. "Mr.", "1.5")
+            # This is a basic heuristic.
+            candidate = self.buffer[:earliest_end+1]
+            remainder = self.buffer[earliest_end+1:]
+            
+            # Very basic abbreviation check: if the "sentence" is too short (<=3 chars) 
+            # and ends in dot, treat it as part of next sentence (e.g. "Mr.")
+            # unless it's just "No." or "Ok."
+            if best_mark == '.' and len(candidate.strip()) <= 3 and candidate.strip().lower() not in ["no.", "ok.", "hi."]:
+                 # It might be an abbreviation, simplified behavior: just wait for more context or next splitter
+                 # But sticking to simple split for now to ensure low latency.
+                 # To do this properly requires lookahead.
+                 pass
+
+            yield candidate.strip()
+            self.buffer = remainder
+
+    def flush(self) -> Iterable[str]:
+        if self.buffer.strip():
+            yield self.buffer.strip()
+        self.buffer = ""
+
+
+def query_ollama_streaming(
     model_name: str,
     messages: list[dict[str, str]],
-    *,
-    segment_queue: queue.Queue[np.ndarray],
-    pending_segments: list[np.ndarray],
-    abort_event: threading.Event,
-    playback_interrupt: threading.Event,
-    show_levels: bool,
     interruptable: bool = True,
-) -> str | None:
-    snippet = ""
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        content = (message.get("content") or "").strip()
-        if not content:
-            continue
-        collapsed = " ".join(content.split())
-        max_len = 80
-        snippet = collapsed[:max_len]
-        if len(collapsed) > max_len:
-            snippet += "…"
-        break
-
-    if snippet:
-        print(
-            f"Querying Ollama model '{model_name}' with \"{snippet}\"…",
-            file=sys.stderr,
-        )
-    else:
-        print(f"Querying Ollama model '{model_name}'…", file=sys.stderr)
+    stop_event: threading.Event | None = None,
+) -> Iterable[str]:
+    """
+    Yields complete sentences from Ollama.
+    """
     client = ollama.Client()
-    start_time = time.perf_counter()
-
-    def extract_content(chunk: Any) -> str:
-        if isinstance(chunk, dict):
-            message = chunk.get("message") or {}
-            content = message.get("content")
-            if content:
-                return content
-            response = chunk.get("response")
-            if response:
-                return response
-            delta = chunk.get("delta")
-            if delta and isinstance(delta, dict):
-                text = delta.get("content")
-                if text:
-                    return text
-            return ""
-
-        message_obj = getattr(chunk, "message", None)
-        if message_obj is not None:
-            content = getattr(message_obj, "content", None)
-            if content:
-                return content
-            if isinstance(message_obj, dict):
-                content = message_obj.get("content")
-                if content:
-                    return content
-
-        for attr in ("response", "content", "delta"):
-            value = getattr(chunk, attr, None)
-            if isinstance(value, str) and value:
-                return value
-            if isinstance(value, dict):
-                text = value.get("content") if hasattr(value, "get") else None
-                if text:
-                    return text
-
-        return ""
+    
+    # Extract just the new user message for logging
+    user_content = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "...")
+    print(f"Querying Ollama '{model_name}': {user_content[:60]}...", file=sys.stderr)
 
     try:
-        # Optimize for speed: use faster generation parameters
         stream = client.chat(
             model=model_name,
             messages=messages,
             stream=True,
             options={
-                "temperature": 0.7,  # Lower = faster, more deterministic
-                "top_p": 0.9,        # Nucleus sampling for faster generation
-                "top_k": 40,         # Limit vocabulary search
-                "num_predict": 100,  # Limit response length (adjust as needed)
-            },
-        )
-    except TypeError:
-        # Fallback: streaming not supported; blocking call (no interruption)
-        response = client.chat(
-            model=model_name,
-            messages=messages,
-            options={
                 "temperature": 0.7,
                 "top_p": 0.9,
                 "top_k": 40,
                 "num_predict": 100,
             },
         )
-        end_time = time.perf_counter()
-        duration = end_time - start_time
-        # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
-        text = response.get("message", {}).get("content", "").strip()
-        meter_break(show_levels)
-        print(f"Assistant: {text}")
-        return text
+    except Exception as e:
+        print(f"Ollama error: {e}", file=sys.stderr)
+        return
 
-    chunks: list[str] = []
+    accumulator = SentenceAccumulator()
 
-    try:
-        for chunk in stream:
-            if interruptable:
-                while True:
-                    try:
-                        new_segment = segment_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                    else:
-                        pending_segments.append(new_segment)
-                        abort_event.set()
-                        playback_interrupt.set()
+    for chunk in stream:
+        if stop_event and stop_event.is_set():
+            # print("Ollama query interrupted.", file=sys.stderr)
+            return
 
-                if abort_event.is_set():
-                    try:
-                        client.cancel(model=model_name)
-                    except Exception:
-                        pass
-                    end_time = time.perf_counter()
-                    duration = end_time - start_time
-                    print(f"Ollama response cancelled after {duration:.2f} seconds due to new input.", file=sys.stderr)
-                    return None
-
-            content = extract_content(chunk)
-            if content:
-                chunks.append(content)
-
-        text = "".join(chunks).strip()
-        if text:
-            end_time = time.perf_counter()
-            duration = end_time - start_time
-            # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
-            meter_break(show_levels)
-            print(f"Assistant: {text}")
-            return text
-
-        if interruptable and abort_event.is_set():
-            end_time = time.perf_counter()
-            duration = end_time - start_time
-            print(f"Ollama response cancelled after {duration:.2f} seconds.", file=sys.stderr)
-            return None
-
-        # Streaming yielded no text; fallback to blocking call
-        response = client.chat(
-            model=model_name,
-            messages=messages,
-            options={
-                "temperature": 0.7,
-                "top_p": 0.9,
-                "top_k": 40,
-                "num_predict": 100,
-            },
-        )
-        end_time = time.perf_counter()
-        duration = end_time - start_time
-        # print(f"Ollama response generated in {duration:.2f} seconds", file=sys.stderr)
-        text = response.get("message", {}).get("content", "").strip()
-        meter_break(show_levels)
-        print(f"Assistant: {text}")
-        return text if text else None
-    finally:
-        stream = None
+        content = ""
+        # Extract content from various chunk formats
+        if isinstance(chunk, dict):
+            content = chunk.get("message", {}).get("content", "")
+        else:
+             # Object access
+            msg = getattr(chunk, "message", None)
+            if msg:
+                content = getattr(msg, "content", "")
+        
+        if content:
+            for sentence in accumulator.add(content):
+                yield sentence
+    
+    for sentence in accumulator.flush():
+        yield sentence
 
 
 def synthesize_with_piper(
@@ -1061,164 +999,129 @@ def synthesize_with_piper(
             wav_file.writeframes(data)
 
 
-def synthesize_and_play_piper_streaming(
-    voice: PiperVoice,
-    text: str,
-    interrupt_event: threading.Event,
-    interruptable: bool = True,
-) -> bool:
-    """Synthesize and play Piper TTS audio in a streaming fashion for lower latency."""
-    print("Synthesizing speech with Piper (streaming)…", file=sys.stderr)
-    audio_iter = voice.synthesize(text)
-    base_sample_rate = int(
-        getattr(voice, "sample_rate", getattr(getattr(voice, "config", {}), "sample_rate", DEFAULT_SAMPLE_RATE))
-    )
+class TTSWorker:
+    """
+    Handles background TTS synthesis and audio buffering.
+    Input: Text sentences
+    Output: Audio chunks in a thread-safe queue for the player
+    """
+    def __init__(self, voice: PiperVoice, sample_rate: int):
+        self.voice = voice
+        self.sample_rate = sample_rate
+        self.input_queue: queue.Queue[str | None] = queue.Queue()
+        self.audio_queue: queue.Queue[np.ndarray | None] = queue.Queue()
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.started = False
 
-    def extract_audio_field(obj: Any) -> Any | None:
-        field_candidates = (
-            "audio",
-            "_audio",
-            "buffer",
-            "data",
-            "pcm",
-            "samples",
-            "wave",
-            "waveform",
-            "frames",
-            "chunk",
-            "audio_int16_bytes",
-            "audio_int16_array",
-            "audio_float_array",
-            "_audio_int16_bytes",
-            "_audio_int16_array",
-        )
-        for attr in field_candidates:
-            value = getattr(obj, attr, None)
-            if value is not None:
-                return value
-        return None
+    def start(self):
+        if not self.started:
+            self.stop_event.clear()
+            self.thread.start()
+            self.started = True
 
-    def to_numpy_array(chunk: Any) -> tuple[np.ndarray, int | None]:
-        """Convert chunk to numpy float32 array for playback."""
-        current_rate: int | None = None
-        data: Any = chunk
+    def stop(self):
+        self.stop_event.set()
+        # Drain queues to unblock
+        while not self.input_queue.empty():
+            try: self.input_queue.get_nowait()
+            except queue.Empty: pass
+        self.input_queue.put(None) # Sentinel
 
-        if AudioChunk is not None and isinstance(chunk, AudioChunk):
-            maybe = extract_audio_field(chunk)
-            if maybe is not None:
-                data = maybe
-            current_rate = getattr(chunk, "sample_rate", None)
-        elif isinstance(chunk, dict):
-            if "audio" in chunk:
-                data = chunk["audio"]
-            else:
-                for key in ("buffer", "data", "pcm", "samples"):
-                    if key in chunk:
-                        data = chunk[key]
-                        break
-            current_rate = chunk.get("sample_rate")
-        else:
-            maybe = extract_audio_field(chunk)
-            if maybe is not None:
-                data = maybe
-                current_rate = getattr(chunk, "sample_rate", None)
+    def put_text(self, text: str):
+        self.input_queue.put(text)
 
-        # Convert to float32 numpy array
-        if isinstance(data, np.ndarray):
-            if data.dtype == np.int16:
-                # Convert int16 to float32 in range [-1.0, 1.0]
-                return (data.astype(np.float32) / 32768.0), current_rate
-            elif data.dtype != np.float32:
-                return data.astype(np.float32), current_rate
-            return data, current_rate
-        if isinstance(data, (bytes, bytearray, memoryview)):
-            # Assume int16 PCM
-            arr = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-            return arr, current_rate
-        if isinstance(data, (tuple, list)) and data:
-            first = data[0]
-            if isinstance(first, np.ndarray):
-                if first.dtype == np.int16:
-                    return (first.astype(np.float32) / 32768.0), current_rate
-                return first.astype(np.float32), current_rate
-            if isinstance(first, (bytes, bytearray, memoryview)):
-                arr = np.frombuffer(first, dtype=np.int16).astype(np.float32) / 32768.0
-                return arr, current_rate
-
-        # Fallback: try to convert to numpy array
-        try:
-            arr = np.array(data, dtype=np.float32)
-            return arr, current_rate
-        except Exception as exc:
-            raise TypeError(
-                f"Unsupported Piper chunk type for streaming: {type(chunk)!r}"
-            ) from exc
-
-    interrupt_event.clear()
-    sample_rate_ref = [base_sample_rate]  # Use list for mutable reference
-    buffer_queue: queue.Queue[np.ndarray] = queue.Queue()
-    buffer_filled = threading.Event()
-    playback_done = threading.Event()
-    error_occurred = threading.Event()
-
-    def producer():
-        """Produce audio chunks and add to buffer."""
-        try:
-            for chunk in audio_iter:
-                if interruptable and interrupt_event.is_set():
-                    break
-                audio_array, maybe_rate = to_numpy_array(chunk)
-                if maybe_rate:
-                    sample_rate_ref[0] = maybe_rate
-                # Ensure 2D array (samples, channels)
-                if audio_array.ndim == 1:
-                    audio_array = audio_array[:, np.newaxis]
-                buffer_queue.put(audio_array)
-                buffer_filled.set()
-            buffer_queue.put(None)  # Sentinel to signal end
-        except Exception as exc:
-            print(f"TTS synthesis error: {exc}", file=sys.stderr)
-            error_occurred.set()
-            buffer_queue.put(None)
-
-    producer_thread = threading.Thread(target=producer, daemon=True)
-    producer_thread.start()
-
-    # Wait for first chunk before starting playback
-    buffer_filled.wait(timeout=5.0)
-    if error_occurred.is_set():
-        return False
-
-    block_size = max(1024, sample_rate_ref[0] // 10)
-    with sd.OutputStream(
-        samplerate=sample_rate_ref[0],
-        channels=1,
-        dtype="float32",
-        blocksize=block_size,
-    ) as stream:
-        while True:
-            if interruptable and interrupt_event.is_set():
-                stream.abort()
-                stream.stop()
-                return False
-
+    def _worker_loop(self):
+        while not self.stop_event.is_set():
             try:
-                chunk = buffer_queue.get(timeout=0.1)
+                text = self.input_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
-            if chunk is None:  # Sentinel - end of stream
+            if text is None:
                 break
 
-            if interruptable and interrupt_event.is_set():
-                stream.abort()
-                stream.stop()
-                return False
+            # Synthesize
+            try:
+                # print(f"[TTS] Synthesizing: {text[:30]}...", file=sys.stderr)
+                stream = self.voice.synthesize(text)
+                for chunk in stream:
+                    if self.stop_event.is_set():
+                        break
+                    
+                    audio_array = None
+                    
+                    # 1. Try to get float array directly (most efficient)
+                    if hasattr(chunk, "audio_float_array") and chunk.audio_float_array is not None:
+                        audio_array = chunk.audio_float_array.astype(np.float32)
+                    
+                    # 2. Try to get bytes
+                    elif hasattr(chunk, "audio_int16_bytes") and chunk.audio_int16_bytes is not None:
+                         audio_data = chunk.audio_int16_bytes
+                         audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                    elif hasattr(chunk, "bytes") and chunk.bytes is not None:
+                         audio_data = chunk.bytes
+                         audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                     # 3. Fallback to generic bytes conversion
+                    else:
+                        try:
+                            audio_data = bytes(chunk)
+                            audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                        except Exception:
+                            pass
 
-            stream.write(chunk)
+                    if audio_array is None:
+                         print(f"TTS Warning: Could not extract audio from {type(chunk)}: {dir(chunk)}", file=sys.stderr)
+                         continue
 
-    producer_thread.join(timeout=1.0)
-    return True
+                    self.audio_queue.put(audio_array)
+            except Exception as e:
+                print(f"TTS Error: {e}", file=sys.stderr)
+        
+        self.audio_queue.put(None) # End of audio stream
+
+
+def play_audio_stream(
+    audio_queue: queue.Queue[np.ndarray | None],
+    sample_rate: int,
+    interrupt_event: threading.Event,
+    interruptable: bool = True,
+) -> None:
+    # print(f"Starting audio playback stream at {sample_rate}Hz...", file=sys.stderr)
+    try:
+        # block_size = max(1024, sample_rate // 10) # 100ms latency
+        # Smaller block size for lower latency?
+        block_size = 1024 
+
+        with sd.OutputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=block_size,
+        ) as stream:
+             while True:
+                if interruptable and interrupt_event.is_set():
+                    # print("Playback interrupted by event.", file=sys.stderr)
+                    return
+
+                try:
+                    chunk = audio_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if chunk is None:
+                    # End of stream
+                    break
+
+                # Write chunk to stream
+                # sd.OutputStream.write expects (frames, channels)
+                if chunk.ndim == 1:
+                    chunk = chunk[:, np.newaxis]
+                
+                stream.write(chunk)
+                
+    except Exception as e:
+        print(f"Playback Error: {e}", file=sys.stderr)
 
 
 def play_audio(audio_path: Path, interrupt_event: threading.Event, interruptable: bool = True) -> bool:
@@ -1276,7 +1179,7 @@ def build_initial_messages(system_prompt: str) -> list[dict[str, str]]:
 
 
 def run_conversation(config: ConversationConfig) -> None:
-    whisper_model = load_whisper_model(config.whisper_model)
+    whisper_model = load_whisper_model(config.whisper_model, config.whisper_compute_type)
     messages = build_initial_messages(config.system_prompt)
     assert config.piper_voice is not None
     piper_voice = load_piper_voice(
@@ -1396,6 +1299,10 @@ def run_conversation(config: ConversationConfig) -> None:
 
     # Use the session directory for audio files instead of a temp dir
     try:
+        # Initialize TTS Worker
+        tts_worker = TTSWorker(piper_voice, config.sample_rate)
+        tts_worker.start()
+
         turn = 1
         while True:
             try:
@@ -1457,67 +1364,106 @@ def run_conversation(config: ConversationConfig) -> None:
             )
 
             abort_event = threading.Event()
-            assistant_text = query_ollama(
-                config.ollama_model,
+            
+            # --- New Streaming Implementation ---
+            
+            # 1. Start TTS Worker
+            tts_worker = TTSWorker(piper_voice, config.sample_rate)
+            tts_worker.start()
+            
+            # 2. Check interruption function
+            def check_interrupt():
+                if not config.interruptable:
+                    return False
+                try:
+                    new_segment = segment_queue.get_nowait()
+                    pending_segments.append(new_segment)
+                    playback_interrupt.set()
+                    abort_event.set()
+                    tts_worker.stop()
+                    return True
+                except queue.Empty:
+                    return False
+
+            # 3. Stream from Ollama -> TTS Worker
+            full_assistant_text = ""
+            interrupted = False
+            
+            # Start a thread to monitor interruptions during LLM generation?
+            # Or just check periodically in the generator loop? 
+            # The generator loop runs in main thread, so we can check there.
+            
+            # Start Playback Thread immediately
+            # Use the TTS voice's sample rate for playback
+            tts_sample_rate = tts_worker.voice.config.sample_rate if tts_worker.voice else config.sample_rate
+            
+            # Clear any stale interrupt from the user's input
+            playback_interrupt.clear()
+            
+            playback_thread = threading.Thread(
+                target=play_audio_stream,
+                args=(tts_worker.audio_queue, tts_sample_rate, playback_interrupt, config.interruptable),
+                daemon=True
+            )
+            playback_thread.start()
+
+            for sentence in query_ollama_streaming(
+                config.ollama_model, 
                 messages,
-                segment_queue=segment_queue,
-                pending_segments=pending_segments,
-                abort_event=abort_event,
-                playback_interrupt=playback_interrupt,
-                show_levels=config.show_levels,
                 interruptable=config.interruptable,
-            )
-            if not assistant_text:
-                append_log_line(
-                    log_file,
-                    {
-                        "type": "assistant_cancelled",
-                        "session_id": session_id,
-                        "turn": turn,
-                    },
-                )
-                # Interrupted during generation: rollback user message and save for concatenation
+                stop_event=abort_event
+            ):
+                if check_interrupt():
+                    interrupted = True
+                    break
+                
+                print(f"\nAssistant: {sentence}", flush=True)
+                full_assistant_text += sentence + " "
+                tts_worker.put_text(sentence)
+                
+            tts_worker.put_text(None) # End of input
+            print() # Newline after response
+            
+            if interrupted:
+                # print("Interrupted during generation.", file=sys.stderr)
+                append_log_line(log_file, {"type": "assistant_cancelled", "session_id": session_id, "turn": turn})
+                 # Rollback
                 if messages and messages[-1]["role"] == "user":
                     messages.pop()
-                pending_concatenation = user_text
-                turn += 1
-                continue
-
-            messages.append({"role": "assistant", "content": assistant_text})
-
-            # Use streaming TTS for lower latency (synthesize and play simultaneously)
-            played = synthesize_and_play_piper_streaming(
-                piper_voice,
-                assistant_text,
-                playback_interrupt,
-                interruptable=config.interruptable,
-            )
-            # Still save audio for logging (synthesize separately)
-            response_audio = session_dir / f"turn-{turn:03d}-response.wav"
-            synthesize_with_piper(
-                piper_voice,
-                assistant_text,
-                response_audio,
-            )
-            if not played:
-                # Interrupted during playback: rollback assistant AND user message, save user text
-                if messages and messages[-1]["role"] == "assistant":
-                    messages.pop()
-                if messages and messages[-1]["role"] == "user":
+                if messages and messages[-1]["role"] == "assistant": # Should not happen yet
                     messages.pop()
                 pending_concatenation = user_text
                 
-            append_log_line(
-                log_file,
-                {
-                    "type": "assistant" if played else "assistant_audio_cancelled",
-                    "session_id": session_id,
-                    "turn": turn,
-                    "text": assistant_text,
-                    "audio_path": str(response_audio),
-                },
-            )
+                # Wait for playback thread to die (it should see interrupt event)
+                playback_thread.join(timeout=1.0)
+                turn += 1
+                continue
 
+            # Wait for playback to finish naturally
+            
+            while playback_thread.is_alive():
+                if config.interruptable and playback_interrupt.is_set():
+                    interrupted = True
+                    break
+                playback_thread.join(timeout=0.1)
+
+            if interrupted:
+                 # Interruption during tail playback
+                 # Treat as interruption: rollback
+                 if messages and messages[-1]["role"] == "user":
+                    messages.pop()
+                 pending_concatenation = user_text
+                 turn += 1
+                 continue
+            
+            messages.append({"role": "assistant", "content": full_assistant_text.strip()})
+            
+            tts_worker.stop() # Cleanup
+
+            # Save full response audio for logging (non-blocking or post-hoc?)
+            # Re-synthesizing for logs is expensive. Ideally we'd capture the stream.
+            # For now, let's skip re-synthesis to save time/resources on Jetson.
+            
             turn += 1
     except KeyboardInterrupt:
         print("\nExiting conversation.")
