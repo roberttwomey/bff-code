@@ -1303,6 +1303,24 @@ def run_conversation(config: ConversationConfig) -> None:
         tts_worker = TTSWorker(piper_voice, config.sample_rate)
         tts_worker.start()
 
+        # Announce readiness
+        print("Ready to chat...", file=sys.stderr)
+        
+        startup_text = "I am connected and ready to chat."
+        if LAST_HEADSET_NAME:
+             # Clean up name for TTS? "OpenRun Pro 2 by Shokz" is fine.
+             startup_text = f"I am connected to the {LAST_HEADSET_NAME} and ready to chat."
+        
+        startup_audio = session_dir / "startup.wav"
+        synthesize_with_piper(
+            piper_voice,
+            startup_text,
+            startup_audio,
+        )
+        # Clear interrupt before playing startup sound
+        playback_interrupt.clear()
+        play_audio(startup_audio, playback_interrupt, interruptable=False)
+
         turn = 1
         while True:
             try:
