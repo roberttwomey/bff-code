@@ -30,6 +30,16 @@ from aiortc import MediaStreamTrack
 from ultralytics import YOLO
 import json
 
+# DDS imports for local connection
+try:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+    from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
+    from unitree_sdk2py.go2.sport.sport_client import SportClient
+    DDS_AVAILABLE = True
+except ImportError:
+    DDS_AVAILABLE = False
+    print("Note: unitree_sdk2py not available. DDS movement will not be used.")
+
 # Optional streaming support
 try:
     from streaming_utils import MJPEGStreamer, RTSPStreamer
@@ -43,6 +53,64 @@ load_dotenv()
 
 # Enable logging for debugging
 logging.basicConfig(level=logging.FATAL)
+
+# Ethernet interface name for local connection
+ETHERNET_INTERFACE = "enP8p1s0"
+
+def is_interface_active(interface_name):
+    """Check if the network interface exists and is active (UP)."""
+    operstate_path = f"/sys/class/net/{interface_name}/operstate"
+    if not os.path.exists(operstate_path):
+        return False
+    
+    try:
+        with open(operstate_path, 'r') as f:
+            operstate = f.read().strip()
+        return operstate == "up"
+    except (IOError, OSError):
+        return False
+
+def check_local_connection(interface_name=ETHERNET_INTERFACE, timeout=2.0):
+    """
+    Check if robot is locally connected via ethernet.
+    This is a quick check that only verifies the interface is active.
+    The actual channel factory initialization should be done separately.
+    Returns True if interface is active, False otherwise.
+    """
+    if not DDS_AVAILABLE:
+        return False
+    
+    return is_interface_active(interface_name)
+
+def verify_dds_connection(interface_name=ETHERNET_INTERFACE, timeout=2.0):
+    """
+    Verify DDS connection by checking for lowstate messages.
+    Channel factory must be initialized before calling this.
+    Returns True if messages are received, False otherwise.
+    """
+    if not DDS_AVAILABLE:
+        return False
+    
+    try:
+        # Set up subscriber to check for messages
+        sub = ChannelSubscriber("rt/lowstate", LowState_)
+        message_received = False
+        
+        def LowStateHandler(msg: LowState_):
+            nonlocal message_received
+            message_received = True
+        
+        sub.Init(LowStateHandler, 10)
+        
+        # Wait for a message with a timeout
+        start_time = time.time()
+        while not message_received and (time.time() - start_time) < timeout:
+            time.sleep(0.1)
+        
+        return message_received
+    except Exception as e:
+        print(f"Error verifying DDS connection: {e}")
+        return False
 
 class HumanFollower:
     """
@@ -74,6 +142,11 @@ class HumanFollower:
         self.conn = None
         self.loop = None
         self.asyncio_thread = None
+        
+        # DDS connection state
+        self.use_dds = False
+        self.sport_client = None
+        self.ethernet_interface = ETHERNET_INTERFACE
         
         # Streaming setup - read from .env if not provided
         # VIDEO_OUTPUT can be 'display' (local window) or 'mjpeg' (remote streaming)
@@ -135,11 +208,51 @@ class HumanFollower:
         # - 2 Hz (0.5s): Very slow, very stable
         
     async def connect(self):
-        """Connect to the Go2 robot"""
+        """Connect to the Go2 robot - tries DDS first, falls back to WebRTC"""
+        # Check for local connection first
+        if DDS_AVAILABLE:
+            print("Checking for local ethernet connection...")
+            if check_local_connection(self.ethernet_interface):
+                print(f"Ethernet interface {self.ethernet_interface} is active, initializing DDS...")
+                try:
+                    # Initialize DDS channel factory
+                    ChannelFactoryInitialize(0, self.ethernet_interface)
+                    
+                    # Verify connection by checking for messages
+                    if verify_dds_connection(self.ethernet_interface):
+                        print("DDS connection verified")
+                        # Initialize SportClient for movement
+                        self.sport_client = SportClient()
+                        self.sport_client.SetTimeout(10.0)
+                        self.sport_client.Init()
+                        
+                        self.use_dds = True
+                        print("DDS movement control initialized")
+                        
+                        # Still need WebRTC for video streaming
+                        print("Connecting via WebRTC for video streaming...")
+                        self.conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=self.ip)
+                        await self.conn.connect()
+                        print("WebRTC connected for video streaming")
+                        
+                        return True
+                    else:
+                        print("DDS connection verification failed - no messages received")
+                        self.use_dds = False
+                except Exception as e:
+                    print(f"Failed to initialize DDS: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    print("Falling back to WebRTC for both video and movement...")
+                    self.use_dds = False
+            else:
+                print("No local ethernet connection detected, using WebRTC for both video and movement...")
+        
+        # Fallback to WebRTC for both video and movement
         try:
             self.conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=self.ip)
             await self.conn.connect()
-            print("Connected to Go2 robot")
+            print("Connected to Go2 robot via WebRTC")
             
             # Switch to normal mode for movement control
             await self.switch_to_normal_mode()
@@ -194,11 +307,38 @@ class HumanFollower:
             traceback.print_exc()
     
     async def move_robot(self, x=0, y=0, z=0):
-        """Move the robot with specified velocities"""
+        """Move the robot with specified velocities - uses DDS if available, otherwise WebRTC"""
         try:
             # Ensure all values are Python native types
             x, y, z = float(x), float(y), float(z)
-            print(f"Sending movement command: x={x:.3f}, y={y:.3f}, z={z:.3f}")
+            
+            # Use DDS if available and initialized
+            if self.use_dds and self.sport_client:
+                # DDS movement (synchronous, non-blocking)
+                try:
+                    code = self.sport_client.Move(x, y, z)
+                    if code == 0:
+                        print(f"DDS movement command: x={x:.3f}, y={y:.3f}, z={z:.3f}")
+                    else:
+                        print(f"DDS movement command failed with code: {code}")
+                except Exception as e:
+                    print(f"Error in DDS movement: {e}")
+                    # Fallback to WebRTC if DDS fails
+                    self.use_dds = False
+                    await self._move_robot_webrtc(x, y, z)
+            else:
+                # WebRTC movement
+                await self._move_robot_webrtc(x, y, z)
+                
+        except Exception as e:
+            print(f"Error moving robot: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    async def _move_robot_webrtc(self, x=0, y=0, z=0):
+        """Move the robot using WebRTC (internal method)"""
+        try:
+            print(f"Sending WebRTC movement command: x={x:.3f}, y={y:.3f}, z={z:.3f}")
             
             response = await self.conn.datachannel.pub_sub.publish_request_new(
                 RTC_TOPIC["SPORT_MOD"], 
@@ -212,14 +352,14 @@ class HumanFollower:
             if response and 'data' in response and 'header' in response['data']:
                 status = response['data']['header']['status']['code']
                 if status == 0:
-                    print(f"Movement command successful: x={x:.3f}, y={y:.3f}, z={z:.3f}")
+                    print(f"WebRTC movement command successful: x={x:.3f}, y={y:.3f}, z={z:.3f}")
                 else:
-                    print(f"Movement command failed with status: {status}")
+                    print(f"WebRTC movement command failed with status: {status}")
             else:
-                print("No response received from movement command")
+                print("No response received from WebRTC movement command")
                 
         except Exception as e:
-            print(f"Error moving robot: {e}")
+            print(f"Error in WebRTC movement: {e}")
             import traceback
             traceback.print_exc()
     
@@ -266,11 +406,30 @@ class HumanFollower:
                     abs(self.current_movement['y']) > 0.01 or 
                     abs(self.current_movement['z']) > 0.01):
                     
-                    await self.move_robot(
-                        self.current_movement['x'],
-                        self.current_movement['y'], 
-                        self.current_movement['z']
-                    )
+                    # For DDS, we can call it directly (it's non-blocking)
+                    if self.use_dds and self.sport_client:
+                        try:
+                            self.sport_client.Move(
+                                self.current_movement['x'],
+                                self.current_movement['y'], 
+                                self.current_movement['z']
+                            )
+                        except Exception as e:
+                            print(f"Error in DDS movement task: {e}")
+                            # Fallback to WebRTC
+                            self.use_dds = False
+                            await self._move_robot_webrtc(
+                                self.current_movement['x'],
+                                self.current_movement['y'], 
+                                self.current_movement['z']
+                            )
+                    else:
+                        # WebRTC movement (async)
+                        await self.move_robot(
+                            self.current_movement['x'],
+                            self.current_movement['y'], 
+                            self.current_movement['z']
+                        )
                 
                 # Send commands at regular intervals
                 await asyncio.sleep(1.0 / self.command_rate_hz)  # Configurable command rate
