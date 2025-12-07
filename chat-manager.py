@@ -98,6 +98,7 @@ DEFAULT_SYSTEM_PROMPT = (
 DEFAULT_OLLAMA_MODEL = os.environ.get("BFF_OLLAMA_MODEL", "gemma3n:e2b")
 DEFAULT_WHISPER_MODEL = os.environ.get("BFF_WHISPER_MODEL", "tiny")
 DEFAULT_SAMPLE_RATE = int(os.environ.get("BFF_SAMPLE_RATE", "16000"))
+DEFAULT_PLAYBACK_SPEED = float(os.environ.get("BFF_PLAYBACK_SPEED", "1.0"))
 DEFAULT_INPUT_DEVICE_KEYWORD = os.environ.get(
     "BFF_INPUT_DEVICE_KEYWORD", "OpenRun Pro 2 by Shokz"
 )
@@ -183,6 +184,12 @@ def parse_args() -> ConversationConfig:
         help="Override Piper config length_scale (lower=faster)",
     )
     parser.add_argument(
+        "--playback-speed",
+        type=float,
+        default=DEFAULT_PLAYBACK_SPEED,
+        help="Audio playback speed multiplier (default: %(default)s). Overrides length_scale if length_scale is not set.",
+    )
+    parser.add_argument(
         "--piper-noise-scale",
         type=float,
         help="Override Piper config noise_scale",
@@ -261,6 +268,16 @@ def parse_args() -> ConversationConfig:
     if input_keyword == "":
         input_keyword = None
 
+    # Calculate length_scale from playback_speed if not explicitly provided
+    length_scale = args.piper_length_scale
+    if length_scale is None:
+        # length_scale of 1.0 is normal speed. Lower is faster.
+        # speed = 1.25 -> length_scale = 1/1.25 = 0.8
+        speed = args.playback_speed
+        if speed <= 0:
+            speed = 1.0
+        length_scale = 1.0 / speed
+
     return ConversationConfig(
         ollama_model=args.ollama_model,
         whisper_model=args.whisper_model,
@@ -270,7 +287,7 @@ def parse_args() -> ConversationConfig:
         system_prompt=args.system_prompt,
         sample_rate=args.sample_rate,
         max_record_seconds=args.max_record_seconds,
-        piper_length_scale=args.piper_length_scale,
+        piper_length_scale=length_scale,
         piper_noise_scale=args.piper_noise_scale,
         piper_noise_w=args.piper_noise_w,
         activation_threshold=args.activation_threshold,
@@ -332,6 +349,10 @@ def load_piper_voice(
 
     if applied:
         config_data.update(applied)
+        # Some Piper voices (e.g. aru) have params inside an 'inference' block
+        if "inference" in config_data:
+             config_data["inference"].update(applied)
+
         tmp_file = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
         tmp_path = Path(tmp_file.name)
         json.dump(config_data, tmp_file)
