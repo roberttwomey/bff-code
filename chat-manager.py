@@ -42,7 +42,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, List
@@ -410,7 +410,7 @@ def ensure_log_dir() -> Path:
 def append_log_line(log_path: Path, payload: dict[str, Any]) -> None:
     record = {"timestamp": datetime.now().isoformat(), **payload}
     with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
 def meter_break(show_levels: bool) -> None:
@@ -1129,12 +1129,20 @@ def play_audio_stream(
     sample_rate: int,
     interrupt_event: threading.Event,
     interruptable: bool = True,
+    save_path: Path | None = None,
 ) -> None:
     # print(f"Starting audio playback stream at {sample_rate}Hz...", file=sys.stderr)
     try:
         # block_size = max(1024, sample_rate // 10) # 100ms latency
         # Smaller block size for lower latency?
         block_size = 1024 
+
+        wav_file = None
+        if save_path:
+            wav_file = wave.open(str(save_path), "wb")
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2) # 16-bit PCM
+            wav_file.setframerate(sample_rate)
 
         with sd.OutputStream(
             samplerate=sample_rate,
@@ -1145,7 +1153,7 @@ def play_audio_stream(
              while True:
                 if interruptable and interrupt_event.is_set():
                     # print("Playback interrupted by event.", file=sys.stderr)
-                    return
+                    break
 
                 try:
                     chunk = audio_queue.get(timeout=0.1)
@@ -1162,6 +1170,16 @@ def play_audio_stream(
                     chunk = chunk[:, np.newaxis]
                 
                 stream.write(chunk)
+
+                if wav_file:
+                    # Convert float32 back to int16 for wav
+                    # formatting: clip to [-1, 1], scale to 32767
+                    clipped = np.clip(chunk, -1.0, 1.0)
+                    int16_data = (clipped * 32767).astype(np.int16)
+                    wav_file.writeframes(int16_data.tobytes())
+        
+        if wav_file:
+            wav_file.close()
                 
     except Exception as e:
         print(f"Playback Error: {e}", file=sys.stderr)
@@ -1246,16 +1264,10 @@ def run_conversation(config: ConversationConfig) -> None:
         {
             "type": "session_start",
             "session_id": session_id,
-            "config": {
-                "ollama_model": config.ollama_model,
-                "whisper_model": config.whisper_model,
-                "piper_voice": str(config.piper_voice),
-                "piper_config": str(config.piper_config) if config.piper_config else None,
-                "length_scale": config.piper_length_scale,
-                "noise_scale": config.piper_noise_scale,
-                "noise_w": config.piper_noise_w,
-                "sample_rate": config.sample_rate,
-            },
+            "config": asdict(config),
+            "env_overrides": {
+                k: v for k, v in os.environ.items() if k.startswith("BFF_")
+            }
         },
     )
 
@@ -1471,9 +1483,11 @@ def run_conversation(config: ConversationConfig) -> None:
             # Clear any stale interrupt from the user's input
             playback_interrupt.clear()
             
+            response_audio_path = session_dir / f"turn-{turn:03d}-response.wav"
+
             playback_thread = threading.Thread(
                 target=play_audio_stream,
-                args=(tts_worker.audio_queue, tts_sample_rate, playback_interrupt, config.interruptable),
+                args=(tts_worker.audio_queue, tts_sample_rate, playback_interrupt, config.interruptable, response_audio_path),
                 daemon=True
             )
             playback_thread.start()
@@ -1544,6 +1558,17 @@ def run_conversation(config: ConversationConfig) -> None:
                  continue
             
             messages.append({"role": "assistant", "content": full_assistant_text.strip()})
+            
+            append_log_line(
+                log_file,
+                {
+                    "type": "assistant",
+                    "session_id": session_id,
+                    "turn": turn,
+                    "text": full_assistant_text.strip(),
+                    "audio_path": str(response_audio_path),
+                },
+            )
             
             tts_worker.stop() # Cleanup
 
