@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,12 @@ DEFAULT_BLOCK_DURATION = float(os.environ.get("BFF_BLOCK_DURATION", "0.2"))
 DEFAULT_INTERRUPTABLE_ENV = os.environ.get("BFF_INTERRUPTABLE", "true").lower()
 DEFAULT_INTERRUPTABLE = DEFAULT_INTERRUPTABLE_ENV in ("true", "1", "yes", "on")
 LOG_ROOT = Path(os.environ.get("BFF_LOG_ROOT", Path.home() / "bff" / "logs")).expanduser()
+DEFAULT_HISTORY_TRUNCATION_LIMIT = int(os.environ.get("BFF_HISTORY_TRUNCATION_LIMIT", "11"))
+DEFAULT_OLLAMA_TEMPERATURE = float(os.environ.get("BFF_OLLAMA_TEMPERATURE", "0.7"))
+DEFAULT_OLLAMA_TOP_P = float(os.environ.get("BFF_OLLAMA_TOP_P", "0.9"))
+DEFAULT_OLLAMA_TOP_K = int(os.environ.get("BFF_OLLAMA_TOP_K", "40"))
+DEFAULT_OLLAMA_NUM_PREDICT = int(os.environ.get("BFF_OLLAMA_NUM_PREDICT", "100"))
+DEFAULT_OLLAMA_NUM_CTX = int(os.environ.get("BFF_OLLAMA_NUM_CTX", "2048"))
 LAST_HEADSET_MAC = os.environ.get("LAST_HEADSET_MAC")
 LAST_HEADSET_NAME = os.environ.get("LAST_HEADSET_NAME")
 
@@ -137,6 +144,12 @@ class ConversationConfig:
     input_device_keyword: str | None = DEFAULT_INPUT_DEVICE_KEYWORD
     input_device_index: int | None = None
     interruptable: bool = DEFAULT_INTERRUPTABLE
+    history_truncation_limit: int = DEFAULT_HISTORY_TRUNCATION_LIMIT
+    ollama_temperature: float = DEFAULT_OLLAMA_TEMPERATURE
+    ollama_top_p: float = DEFAULT_OLLAMA_TOP_P
+    ollama_top_k: int = DEFAULT_OLLAMA_TOP_K
+    ollama_num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT
+    ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
 
 
 def parse_args() -> ConversationConfig:
@@ -298,6 +311,12 @@ def parse_args() -> ConversationConfig:
         show_levels=args.show_levels,
         input_device_keyword=input_keyword,
         interruptable=False if args.no_interruptable else DEFAULT_INTERRUPTABLE,
+        history_truncation_limit=DEFAULT_HISTORY_TRUNCATION_LIMIT,
+        ollama_temperature=DEFAULT_OLLAMA_TEMPERATURE,
+        ollama_top_p=DEFAULT_OLLAMA_TOP_P,
+        ollama_top_k=DEFAULT_OLLAMA_TOP_K,
+        ollama_num_predict=DEFAULT_OLLAMA_NUM_PREDICT,
+        ollama_num_ctx=DEFAULT_OLLAMA_NUM_CTX,
     )
 
 
@@ -873,6 +892,7 @@ def query_ollama_streaming(
     messages: list[dict[str, str]],
     interruptable: bool = True,
     stop_event: threading.Event | None = None,
+    options: dict[str, Any] | None = None,
 ) -> Iterable[str]:
     """
     Yields complete sentences from Ollama.
@@ -888,11 +908,13 @@ def query_ollama_streaming(
             model=model_name,
             messages=messages,
             stream=True,
-            options={
+            keep_alive=-1,
+            options=options or {
                 "temperature": 0.7,
                 "top_p": 0.9,
                 "top_k": 40,
                 "num_predict": 100,
+                "num_ctx": 2048,
             },
         )
     except Exception as e:
@@ -1391,6 +1413,16 @@ def run_conversation(config: ConversationConfig) -> None:
                 continue
 
             messages.append({"role": "user", "content": user_text})
+            
+            # Truncate history: Keep generic system prompt + last N messages
+            # This prevents the context from growing indefinitely and slowing down prefill.
+            limit = config.history_truncation_limit
+            if len(messages) > limit:
+                # Keep system prompt (index 0) and the last (limit - 1) messages
+                # We subtract 1 to account for the system prompt
+                num_to_keep = limit - 1
+                messages = [messages[0]] + messages[-num_to_keep:]
+
             append_log_line(
                 log_file,
                 {
@@ -1450,7 +1482,14 @@ def run_conversation(config: ConversationConfig) -> None:
                 config.ollama_model, 
                 messages,
                 interruptable=config.interruptable,
-                stop_event=abort_event
+                stop_event=abort_event,
+                options={
+                    "temperature": config.ollama_temperature,
+                    "top_p": config.ollama_top_p,
+                    "top_k": config.ollama_top_k,
+                    "num_predict": config.ollama_num_predict,
+                    "num_ctx": config.ollama_num_ctx,
+                }
             ):
                 if check_interrupt():
                     interrupted = True
@@ -1458,7 +1497,16 @@ def run_conversation(config: ConversationConfig) -> None:
                 
                 print(f"\nAssistant: {sentence}", flush=True)
                 full_assistant_text += sentence + " "
-                tts_worker.put_text(sentence)
+                
+                # --- CLEANING ---
+                # Remove asterisks, headers, bullets, parenthesis/brackets blocks (e.g. [laughs])
+                cleaned_sentence = re.sub(r'[\*#_`~]', '', sentence)                   # Remove markdown chars
+                cleaned_sentence = re.sub(r'\([^\)]*\)', '', cleaned_sentence)        # Remove (content)
+                cleaned_sentence = re.sub(r'\[[^\]]*\]', '', cleaned_sentence)        # Remove [content]
+                cleaned_sentence = re.sub(r'\s+', ' ', cleaned_sentence).strip()     # Normalize whitespace
+
+                if cleaned_sentence:
+                     tts_worker.put_text(cleaned_sentence)
                 
             tts_worker.put_text(None) # End of input
             print() # Newline after response
