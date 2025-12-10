@@ -1483,7 +1483,6 @@ def run_conversation(config: ConversationConfig) -> None:
                     log_file,
                     {
                         "type": "reset",
-                        "session_id": session_id,
                         "turn": turn,
                         "text": user_text,
                         "audio_path": str(raw_audio),
@@ -1515,7 +1514,6 @@ def run_conversation(config: ConversationConfig) -> None:
                 log_file,
                 {
                     "type": "user",
-                    "session_id": session_id,
                     "turn": turn,
                     "text": user_text,
                     "audio_path": str(raw_audio),
@@ -1624,7 +1622,7 @@ def run_conversation(config: ConversationConfig) -> None:
                 tts_worker.flush()
                 tts_worker.stop()
                 # print("Interrupted during generation.", file=sys.stderr)
-                append_log_line(log_file, {"type": "assistant_cancelled", "session_id": session_id, "turn": turn})
+                append_log_line(log_file, {"type": "assistant_cancelled", "turn": turn})
                  # Rollback
                 if messages and messages[-1]["role"] == "user":
                     messages.pop()
@@ -1671,7 +1669,6 @@ def run_conversation(config: ConversationConfig) -> None:
                 log_file,
                 {
                     "type": "assistant",
-                    "session_id": session_id,
                     "turn": turn,
                     "text": full_assistant_text.strip(),
                     "audio_path": str(response_audio_path),
@@ -1696,7 +1693,7 @@ def run_conversation(config: ConversationConfig) -> None:
         producer_thread.join(timeout=1.0)
         append_log_line(
             log_file,
-            {"type": "session_end", "session_id": session_id},
+            {"type": "session_end"},
         )
 
 
