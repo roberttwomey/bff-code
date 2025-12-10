@@ -45,7 +45,7 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, List
+from typing import Any, Callable, Iterable, List
 import wave
 
 import numpy as np
@@ -727,9 +727,17 @@ def rms_amplitude(block: np.ndarray) -> float:
 
 
 def phrase_stream(
-    config: ConversationConfig, stop_event: threading.Event | None = None
+    config: ConversationConfig, 
+    stop_event: threading.Event | None = None,
+    on_voice_activity: Callable[[], None] | None = None,
 ) -> Iterable[np.ndarray]:
-    """Yield successive speech segments detected from the microphone."""
+    """Yield successive speech segments detected from the microphone.
+    
+    Args:
+        config: Conversation configuration
+        stop_event: Event to stop the stream
+        on_voice_activity: Callback called immediately when voice activity is detected
+    """
 
     channels = 1
     block_size = max(1, int(config.sample_rate * config.block_duration))
@@ -783,6 +791,9 @@ def phrase_stream(
 
             if not recording:
                 if amp >= config.activation_threshold:
+                    # Voice activity detected - pause immediately
+                    if on_voice_activity:
+                        on_voice_activity()
                     recording = True
                     collected = [block]
                     silence_blocks = 0
@@ -1054,28 +1065,59 @@ class TTSWorker:
         self.input_queue: queue.Queue[str | None] = queue.Queue()
         self.audio_queue: queue.Queue[np.ndarray | None] = queue.Queue()
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()  # For pausing synthesis
         self.thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.started = False
 
     def start(self):
         if not self.started:
             self.stop_event.clear()
+            self.pause_event.clear()
             self.thread.start()
             self.started = True
 
     def stop(self):
         self.stop_event.set()
+        self.pause_event.clear()  # Unpause to allow thread to exit
         # Drain queues to unblock
         while not self.input_queue.empty():
             try: self.input_queue.get_nowait()
             except queue.Empty: pass
         self.input_queue.put(None) # Sentinel
 
+    def pause(self):
+        """Pause TTS synthesis (stops processing new text, but keeps worker alive)"""
+        self.pause_event.set()
+
+    def resume(self):
+        """Resume TTS synthesis"""
+        self.pause_event.clear()
+
+    def flush(self):
+        """Flush all queued audio chunks and pending text"""
+        # Clear audio queue
+        while not self.audio_queue.empty():
+            try: 
+                self.audio_queue.get_nowait()
+            except queue.Empty: 
+                pass
+        # Clear input queue
+        while not self.input_queue.empty():
+            try: 
+                self.input_queue.get_nowait()
+            except queue.Empty: 
+                pass
+
     def put_text(self, text: str):
         self.input_queue.put(text)
 
     def _worker_loop(self):
         while not self.stop_event.is_set():
+            # Check if paused
+            if self.pause_event.is_set():
+                time.sleep(0.1)
+                continue
+                
             try:
                 text = self.input_queue.get(timeout=0.1)
             except queue.Empty:
@@ -1090,6 +1132,9 @@ class TTSWorker:
                 stream = self.voice.synthesize(text)
                 for chunk in stream:
                     if self.stop_event.is_set():
+                        break
+                    # Check if paused during synthesis
+                    if self.pause_event.is_set():
                         break
                     
                     audio_array = None
@@ -1152,6 +1197,7 @@ def play_audio_stream(
         ) as stream:
              while True:
                 if interruptable and interrupt_event.is_set():
+                    # Gracefully stop playback when interrupted
                     # print("Playback interrupted by event.", file=sys.stderr)
                     break
 
@@ -1339,13 +1385,29 @@ def run_conversation(config: ConversationConfig) -> None:
     pending_segments: list[np.ndarray] = []
     playback_interrupt = threading.Event()
     pending_concatenation = ""
+    
+    # Shared references to current TTS worker and playback thread for interruption
+    current_tts_worker: TTSWorker | None = None
+    current_playback_thread: threading.Thread | None = None
+    current_abort_event: threading.Event | None = None
+
+    def on_voice_activity_detected():
+        """Called immediately when voice activity is detected (before phrase is complete)"""
+        if config.interruptable:
+            # Immediately pause TTS synthesis and flush audio queue
+            if current_tts_worker is not None:
+                current_tts_worker.pause()
+                current_tts_worker.flush()  # Flush queued audio chunks
+            playback_interrupt.set()
+            # Also abort current LLM generation if in progress
+            if current_abort_event is not None:
+                current_abort_event.set()
 
     def producer() -> None:
         try:
-            for segment in phrase_stream(config, stop_event=stop_event):
+            for segment in phrase_stream(config, stop_event=stop_event, on_voice_activity=on_voice_activity_detected):
                 segment_queue.put(segment)
-                if config.interruptable:
-                    playback_interrupt.set()
+                # Note: pausing already happened in on_voice_activity_detected when voice was first detected
         except Exception as exc:
             print(f"Phrase producer error: {exc}", file=sys.stderr)
 
@@ -1362,9 +1424,9 @@ def run_conversation(config: ConversationConfig) -> None:
         print("Ready to chat...", file=sys.stderr)
         
         startup_text = "I am connected and ready to chat."
-        if LAST_HEADSET_NAME:
-             # Clean up name for TTS? "OpenRun Pro 2 by Shokz" is fine.
-             startup_text = f"I am connected to the {LAST_HEADSET_NAME} and ready to chat."
+        # if LAST_HEADSET_NAME:
+        #      # Clean up name for TTS? "OpenRun Pro 2 by Shokz" is fine.
+        #      startup_text = f"I am connected to the {LAST_HEADSET_NAME} and ready to chat."
         
         startup_audio = session_dir / "startup.wav"
         synthesize_with_piper(
@@ -1389,9 +1451,23 @@ def run_conversation(config: ConversationConfig) -> None:
             raw_audio = session_dir / f"turn-{turn:03d}-input.wav"
             sf.write(raw_audio, phrase, config.sample_rate)
 
+            # If this segment interrupted a previous turn, ensure previous TTS is fully stopped
+            if current_tts_worker is not None:
+                current_tts_worker.stop()
+                current_tts_worker = None
+            if current_playback_thread is not None and current_playback_thread.is_alive():
+                playback_interrupt.set()
+                current_playback_thread.join(timeout=0.5)
+                current_playback_thread = None
+            if current_abort_event is not None:
+                current_abort_event.set()
+                current_abort_event = None
+
             user_text = transcribe_audio(whisper_model, raw_audio, config.show_levels)
             if not user_text:
                 print("Did not catch that. Let's try again.")
+                # Clear interrupt flag since this didn't result in a query
+                playback_interrupt.clear()
                 continue
 
             if pending_concatenation:
@@ -1454,6 +1530,10 @@ def run_conversation(config: ConversationConfig) -> None:
             tts_worker = TTSWorker(piper_voice, config.sample_rate)
             tts_worker.start()
             
+            # Store references for interruption handling
+            current_tts_worker = tts_worker
+            current_abort_event = abort_event
+            
             # 2. Check interruption function
             def check_interrupt():
                 if not config.interruptable:
@@ -1461,6 +1541,9 @@ def run_conversation(config: ConversationConfig) -> None:
                 try:
                     new_segment = segment_queue.get_nowait()
                     pending_segments.append(new_segment)
+                    # Pause and flush TTS (already done by producer, but ensure it here too)
+                    tts_worker.pause()
+                    tts_worker.flush()
                     playback_interrupt.set()
                     abort_event.set()
                     tts_worker.stop()
@@ -1490,6 +1573,7 @@ def run_conversation(config: ConversationConfig) -> None:
                 args=(tts_worker.audio_queue, tts_sample_rate, playback_interrupt, config.interruptable, response_audio_path),
                 daemon=True
             )
+            current_playback_thread = playback_thread
             playback_thread.start()
 
             for sentence in query_ollama_streaming(
@@ -1526,6 +1610,10 @@ def run_conversation(config: ConversationConfig) -> None:
             print() # Newline after response
             
             if interrupted:
+                # New audio input detected that resulted in interruption
+                # Flush TTS queue completely and cancel everything
+                tts_worker.flush()
+                tts_worker.stop()
                 # print("Interrupted during generation.", file=sys.stderr)
                 append_log_line(log_file, {"type": "assistant_cancelled", "session_id": session_id, "turn": turn})
                  # Rollback
@@ -1537,6 +1625,10 @@ def run_conversation(config: ConversationConfig) -> None:
                 
                 # Wait for playback thread to die (it should see interrupt event)
                 playback_thread.join(timeout=1.0)
+                # Clear references
+                current_tts_worker = None
+                current_playback_thread = None
+                current_abort_event = None
                 turn += 1
                 continue
 
@@ -1545,6 +1637,9 @@ def run_conversation(config: ConversationConfig) -> None:
             while playback_thread.is_alive():
                 if config.interruptable and playback_interrupt.is_set():
                     interrupted = True
+                    # Flush TTS queue when interrupted during playback
+                    tts_worker.flush()
+                    tts_worker.stop()
                     break
                 playback_thread.join(timeout=0.1)
 
@@ -1554,6 +1649,10 @@ def run_conversation(config: ConversationConfig) -> None:
                  if messages and messages[-1]["role"] == "user":
                     messages.pop()
                  pending_concatenation = user_text
+                 # Clear references
+                 current_tts_worker = None
+                 current_playback_thread = None
+                 current_abort_event = None
                  turn += 1
                  continue
             
@@ -1571,6 +1670,10 @@ def run_conversation(config: ConversationConfig) -> None:
             )
             
             tts_worker.stop() # Cleanup
+            # Clear references after successful completion
+            current_tts_worker = None
+            current_playback_thread = None
+            current_abort_event = None
 
             # Save full response audio for logging (non-blocking or post-hoc?)
             # Re-synthesizing for logs is expensive. Ideally we'd capture the stream.
