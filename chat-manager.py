@@ -1576,6 +1576,9 @@ def run_conversation(config: ConversationConfig) -> None:
             current_playback_thread = playback_thread
             playback_thread.start()
 
+            # Track timing for each sentence
+            prev_sentence_time = time.perf_counter()
+            
             for sentence in query_ollama_streaming(
                 config.ollama_model, 
                 messages,
@@ -1593,7 +1596,13 @@ def run_conversation(config: ConversationConfig) -> None:
                     interrupted = True
                     break
                 
-                print(f"\nAssistant: {sentence}", flush=True)
+                # Calculate time elapsed since previous sentence
+                current_time = time.perf_counter()
+                elapsed = current_time - prev_sentence_time
+                prev_sentence_time = current_time
+                
+                # Print with timing information
+                print(f"\nAssistant: {sentence} ({elapsed:.2f}s)", flush=True)
                 full_assistant_text += sentence + " "
                 
                 # --- CLEANING ---
