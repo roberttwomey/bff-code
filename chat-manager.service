@@ -1,0 +1,30 @@
+[Unit]
+Description=BFF Chat Manager - Voice Chat Assistant
+After=network.target sound.target bluetooth.service pulseaudio.service
+Wants=bluetooth.service pulseaudio.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/bff-code
+Environment="HOME=%h"
+Environment="USER=%u"
+
+# Load environment variables from .env file
+EnvironmentFile=%h/code/bff-code/.env
+
+# Command to run - use wrapper script that properly activates conda environment
+ExecStart=/bin/bash -l %h/code/bff-code/run-chat-manager.sh
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chat-manager
+
+[Install]
+WantedBy=default.target
