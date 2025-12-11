@@ -110,6 +110,8 @@ DEFAULT_MIN_PHRASE_SECONDS = float(os.environ.get("BFF_MIN_PHRASE_SECONDS", "0.5
 DEFAULT_BLOCK_DURATION = float(os.environ.get("BFF_BLOCK_DURATION", "0.2"))
 DEFAULT_INTERRUPTABLE_ENV = os.environ.get("BFF_INTERRUPTABLE", "true").lower()
 DEFAULT_INTERRUPTABLE = DEFAULT_INTERRUPTABLE_ENV in ("true", "1", "yes", "on")
+DEFAULT_FLUSH_ON_INTERRUPT_ENV = os.environ.get("BFF_FLUSH_ON_INTERRUPT", "false").lower()
+DEFAULT_FLUSH_ON_INTERRUPT = DEFAULT_FLUSH_ON_INTERRUPT_ENV in ("true", "1", "yes", "on")
 LOG_ROOT = Path(os.environ.get("BFF_LOG_ROOT", Path.home() / "bff" / "logs")).expanduser()
 DEFAULT_HISTORY_TRUNCATION_LIMIT = int(os.environ.get("BFF_HISTORY_TRUNCATION_LIMIT", "11"))
 DEFAULT_OLLAMA_TEMPERATURE = float(os.environ.get("BFF_OLLAMA_TEMPERATURE", "0.7"))
@@ -144,6 +146,7 @@ class ConversationConfig:
     input_device_keyword: str | None = DEFAULT_INPUT_DEVICE_KEYWORD
     input_device_index: int | None = None
     interruptable: bool = DEFAULT_INTERRUPTABLE
+    flush_on_interrupt: bool = DEFAULT_FLUSH_ON_INTERRUPT
     history_truncation_limit: int = DEFAULT_HISTORY_TRUNCATION_LIMIT
     ollama_temperature: float = DEFAULT_OLLAMA_TEMPERATURE
     ollama_top_p: float = DEFAULT_OLLAMA_TOP_P
@@ -1471,9 +1474,13 @@ def run_conversation(config: ConversationConfig) -> None:
                 continue
 
             if pending_concatenation:
-                print(f"Concatenating previous input: '{pending_concatenation}' + '{user_text}'", file=sys.stderr)
-                user_text = f"{pending_concatenation} {user_text}"
-                pending_concatenation = ""
+                if config.flush_on_interrupt:
+                    print(f"Flushing previous input: '{pending_concatenation}' (flush on interrupt enabled)", file=sys.stderr)
+                    pending_concatenation = ""
+                else:
+                    print(f"Concatenating previous input: '{pending_concatenation}' + '{user_text}'", file=sys.stderr)
+                    user_text = f"{pending_concatenation} {user_text}"
+                    pending_concatenation = ""
 
             # Check for reset command
             if is_reset_command(user_text):
