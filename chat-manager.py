@@ -851,24 +851,30 @@ def auto_detect_pulse_sinks(
     if not sinks:
         return []
 
-    matched: list[str] = []
+    usb_matches: list[str] = []
+    bt_matches: list[str] = []
+    bluez_matches: list[str] = []
+
     for sink in sinks:
         sink_lower = sink.lower()
         if usb_keyword and usb_keyword.lower() in sink_lower:
-            matched.append(sink)
-            continue
+            usb_matches.append(sink)
         if bt_keyword and bt_keyword.lower() in sink_lower:
-            matched.append(sink)
-            continue
+            bt_matches.append(sink)
         if "bluez_sink" in sink_lower:
-            matched.append(sink)
+            bluez_matches.append(sink)
 
-    # Prefer unique list
-    deduped: list[str] = []
-    for item in matched:
-        if item not in deduped:
-            deduped.append(item)
-    return deduped
+    if usb_matches:
+        combined: list[str] = []
+        for item in usb_matches + bt_matches + bluez_matches:
+            if item not in combined:
+                combined.append(item)
+        return combined
+    if bt_matches:
+        return bt_matches
+    if bluez_matches:
+        return bluez_matches
+    return []
 
 
 def set_default_pulse_sink(sink_name: str) -> None:
@@ -1741,10 +1747,29 @@ def run_conversation(config: ConversationConfig) -> None:
         # Announce readiness
         print("Ready to chat...", file=sys.stderr)
         
-        startup_text = "I am connected and ready to chat."
-        # if LAST_HEADSET_NAME:
-        #      # Clean up name for TTS? "OpenRun Pro 2 by Shokz" is fine.
-        #      startup_text = f"I am connected to the {LAST_HEADSET_NAME} and ready to chat."
+        startup_intro = "Bluetooth connected, ready to chat."
+        startup_prompt = "Give a short friendly greeting to start the conversation. One sentence."
+        startup_line = ""
+        for sentence in query_ollama_streaming(
+            config.ollama_model,
+            build_initial_messages(config.system_prompt)
+            + [{"role": "user", "content": startup_prompt}],
+            interruptable=config.interruptable,
+            options={
+                "temperature": config.ollama_temperature,
+                "top_p": config.ollama_top_p,
+                "top_k": config.ollama_top_k,
+                "num_predict": min(config.ollama_num_predict, 60),
+                "num_ctx": config.ollama_num_ctx,
+            },
+        ):
+            startup_line = sentence.strip()
+            if startup_line:
+                break
+
+        startup_text = startup_intro
+        if startup_line:
+            startup_text = f"{startup_intro} {startup_line}"
         
         startup_audio = session_dir / "startup.wav"
         synthesize_with_piper(
