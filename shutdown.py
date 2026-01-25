@@ -6,6 +6,8 @@ import argparse
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, BmsCmd_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_, unitree_go_msg_dds__BmsCmd_
+from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+from unitree_sdk2py.idl.default import std_msgs_msg_dds__String_
 from unitree_sdk2py.go2.sport.sport_client import SportClient
 from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
 from unitree_sdk2py.utils.crc import CRC
@@ -60,6 +62,11 @@ class Custom:
         self.robot_state_client = RobotStateClient()
         self.robot_state_client.SetTimeout(10.0)
         self.robot_state_client.Init()
+
+        # Lidar publisher
+        self.lidar_publisher = ChannelPublisher("rt/utlidar/switch", String_)
+        self.lidar_publisher.Init()
+        self.lidar_cmd = std_msgs_msg_dds__String_()
     
     def InitLowCmd(self):
         """Initialize LowCmd with required header and motor values"""
@@ -77,9 +84,33 @@ class Custom:
             self.low_cmd.motor_cmd[i].kd = 0
             self.low_cmd.motor_cmd[i].tau = 0
         
+    def set_lidar_state(self, status: str) -> bool:
+        """
+        Set lidar on or off.
+        
+        Args:
+            status: "ON" or "OFF"
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if status not in ["ON", "OFF"]:
+                print(f"Invalid lidar status: {status}")
+                return False
+            
+            self.lidar_cmd.data = status
+            self.lidar_publisher.Write(self.lidar_cmd)
+            return True
+        except Exception as e:
+            print(f"Error setting lidar state: {e}")
+            return False
+        
     def stand_down(self):
         """Asking robot to stand down"""
         print("Asking robot to stand down...")
+        self.set_lidar_state("OFF")
+        time.sleep(1.0)
         self.sport_client.StandDown()
     
     def stand_up(self):

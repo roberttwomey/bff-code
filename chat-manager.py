@@ -42,7 +42,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, List
@@ -119,6 +119,17 @@ DEFAULT_OLLAMA_TOP_P = float(os.environ.get("BFF_OLLAMA_TOP_P", "0.9"))
 DEFAULT_OLLAMA_TOP_K = int(os.environ.get("BFF_OLLAMA_TOP_K", "40"))
 DEFAULT_OLLAMA_NUM_PREDICT = int(os.environ.get("BFF_OLLAMA_NUM_PREDICT", "100"))
 DEFAULT_OLLAMA_NUM_CTX = int(os.environ.get("BFF_OLLAMA_NUM_CTX", "2048"))
+DEFAULT_OUTPUT_USB_KEYWORD = os.environ.get("BFF_OUTPUT_USB_KEYWORD", "USB")
+DEFAULT_OUTPUT_BT_KEYWORD = os.environ.get("BFF_OUTPUT_BT_KEYWORD")
+DEFAULT_OUTPUT_SAMPLE_RATE_ENV = os.environ.get("BFF_OUTPUT_SAMPLE_RATE")
+DEFAULT_OUTPUT_SAMPLE_RATE = (
+    int(DEFAULT_OUTPUT_SAMPLE_RATE_ENV) if DEFAULT_OUTPUT_SAMPLE_RATE_ENV else None
+)
+DEFAULT_PULSE_SINKS = os.environ.get("BFF_PULSE_SINKS")
+DEFAULT_PULSE_COMBINED_SINK_NAME = os.environ.get(
+    "BFF_PULSE_COMBINED_SINK_NAME", "bff_combined"
+)
+DEFAULT_PULSE_DEVICE_NAME = os.environ.get("BFF_PULSE_DEVICE_NAME", "pulse")
 LAST_HEADSET_MAC = os.environ.get("LAST_HEADSET_MAC")
 LAST_HEADSET_NAME = os.environ.get("LAST_HEADSET_NAME")
 
@@ -145,6 +156,13 @@ class ConversationConfig:
     show_levels: bool = True
     input_device_keyword: str | None = DEFAULT_INPUT_DEVICE_KEYWORD
     input_device_index: int | None = None
+    output_usb_keyword: str | None = DEFAULT_OUTPUT_USB_KEYWORD
+    output_bt_keyword: str | None = DEFAULT_OUTPUT_BT_KEYWORD
+    output_sample_rate: int | None = DEFAULT_OUTPUT_SAMPLE_RATE
+    pulse_sinks: list[str] = field(default_factory=list)
+    pulse_combined_sink_name: str = DEFAULT_PULSE_COMBINED_SINK_NAME
+    pulse_device_name: str = DEFAULT_PULSE_DEVICE_NAME
+    output_device_indices: list[str] = field(default_factory=list)
     interruptable: bool = DEFAULT_INTERRUPTABLE
     flush_on_interrupt: bool = DEFAULT_FLUSH_ON_INTERRUPT
     history_truncation_limit: int = DEFAULT_HISTORY_TRUNCATION_LIMIT
@@ -263,6 +281,37 @@ def parse_args() -> ConversationConfig:
         help="Substring to match desired input device (default: %(default)s)",
     )
     parser.add_argument(
+        "--output-usb-keyword",
+        default=DEFAULT_OUTPUT_USB_KEYWORD,
+        help="Substring to match USB output device (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output-bt-keyword",
+        default=DEFAULT_OUTPUT_BT_KEYWORD,
+        help="Substring to match Bluetooth output device (default: env BFF_OUTPUT_BT_KEYWORD or headset name)",
+    )
+    parser.add_argument(
+        "--output-sample-rate",
+        type=int,
+        default=DEFAULT_OUTPUT_SAMPLE_RATE,
+        help="Override playback sample rate (default: env BFF_OUTPUT_SAMPLE_RATE or voice rate)",
+    )
+    parser.add_argument(
+        "--pulse-sinks",
+        default=DEFAULT_PULSE_SINKS,
+        help="Comma-separated PulseAudio sink names to combine for output (default: env BFF_PULSE_SINKS)",
+    )
+    parser.add_argument(
+        "--pulse-combined-sink-name",
+        default=DEFAULT_PULSE_COMBINED_SINK_NAME,
+        help="PulseAudio combined sink name (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--pulse-device-name",
+        default=DEFAULT_PULSE_DEVICE_NAME,
+        help="PulseAudio output device name for PortAudio (default: %(default)s)",
+    )
+    parser.add_argument(
         "--sample-rate",
         type=int,
         default=DEFAULT_SAMPLE_RATE,
@@ -294,6 +343,8 @@ def parse_args() -> ConversationConfig:
             speed = 1.0
         length_scale = 1.0 / speed
 
+    pulse_sinks = [s.strip() for s in (args.pulse_sinks or "").split(",") if s.strip()]
+
     return ConversationConfig(
         ollama_model=args.ollama_model,
         whisper_model=args.whisper_model,
@@ -314,6 +365,12 @@ def parse_args() -> ConversationConfig:
         show_levels=args.show_levels,
         input_device_keyword=input_keyword,
         interruptable=False if args.no_interruptable else DEFAULT_INTERRUPTABLE,
+        output_usb_keyword=args.output_usb_keyword.strip() if args.output_usb_keyword else None,
+        output_bt_keyword=args.output_bt_keyword.strip() if args.output_bt_keyword else None,
+        output_sample_rate=args.output_sample_rate,
+        pulse_sinks=pulse_sinks,
+        pulse_combined_sink_name=args.pulse_combined_sink_name,
+        pulse_device_name=args.pulse_device_name,
         history_truncation_limit=DEFAULT_HISTORY_TRUNCATION_LIMIT,
         ollama_temperature=DEFAULT_OLLAMA_TEMPERATURE,
         ollama_top_p=DEFAULT_OLLAMA_TOP_P,
@@ -725,8 +782,176 @@ def find_input_device(keyword: str, min_channels: int = 1) -> int | None:
     return None
 
 
+def ensure_pulse_combined_sink(sinks: list[str], sink_name: str) -> str | None:
+    if not sinks:
+        return None
+
+    try:
+        modules = subprocess.run(
+            ["pactl", "list", "short", "modules"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for line in modules.stdout.splitlines():
+            if "module-combine-sink" in line and f"sink_name={sink_name}" in line:
+                return sink_name
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            [
+                "pactl",
+                "load-module",
+                "module-combine-sink",
+                f"sink_name={sink_name}",
+                f"slaves={','.join(sinks)}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return sink_name
+        print(
+            f"PulseAudio combine-sink error: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+    except Exception as exc:
+        print(f"PulseAudio combine-sink error: {exc}", file=sys.stderr)
+
+    return None
+
+
+def list_pulse_sinks() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return []
+
+    sinks: list[str] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            sinks.append(parts[1])
+    return sinks
+
+
+def auto_detect_pulse_sinks(
+    usb_keyword: str | None,
+    bt_keyword: str | None,
+) -> list[str]:
+    sinks = list_pulse_sinks()
+    if not sinks:
+        return []
+
+    matched: list[str] = []
+    for sink in sinks:
+        sink_lower = sink.lower()
+        if usb_keyword and usb_keyword.lower() in sink_lower:
+            matched.append(sink)
+            continue
+        if bt_keyword and bt_keyword.lower() in sink_lower:
+            matched.append(sink)
+            continue
+        if "bluez_sink" in sink_lower:
+            matched.append(sink)
+
+    # Prefer unique list
+    deduped: list[str] = []
+    for item in matched:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
+def set_default_pulse_sink(sink_name: str) -> None:
+    try:
+        subprocess.run(
+            ["pactl", "set-default-sink", sink_name],
+            capture_output=True,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def resolve_output_devices(config: ConversationConfig) -> list[str]:
+    output_indices: list[str] = []
+    pulse_sinks = config.pulse_sinks
+    if not pulse_sinks:
+        pulse_sinks = auto_detect_pulse_sinks(
+            config.output_usb_keyword, config.output_bt_keyword
+        )
+    combined_sink = ensure_pulse_combined_sink(
+        pulse_sinks, config.pulse_combined_sink_name
+    )
+    if combined_sink:
+        set_default_pulse_sink(combined_sink)
+    output_indices.append(config.pulse_device_name)
+    return output_indices
+
+
+def log_audio_devices() -> None:
+    """Print full list of audio devices with channel info."""
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:
+        print(f"Audio device query failed: {exc}", file=sys.stderr)
+        return
+
+    try:
+        default_input, default_output = sd.default.device
+    except Exception:
+        default_input, default_output = None, None
+
+    print("", file=sys.stderr)
+    print("Available audio devices:", file=sys.stderr)
+    print("=" * 26, file=sys.stderr)
+    for idx, device in enumerate(devices):
+        name = device.get("name", "unknown")
+        max_in = device.get("max_input_channels", 0)
+        max_out = device.get("max_output_channels", 0)
+        default_flags = []
+        if default_input is not None and idx == default_input:
+            default_flags.append("default input")
+        if default_output is not None and idx == default_output:
+            default_flags.append("default output")
+        suffix = f" [{', '.join(default_flags)}]" if default_flags else ""
+        print(f"{idx}) {name} (in={max_in}, out={max_out}){suffix}", file=sys.stderr)
+    print("", file=sys.stderr)
+
+
 def rms_amplitude(block: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(block))))
+
+
+def resample_audio(
+    data: np.ndarray,
+    source_rate: int,
+    target_rate: int,
+) -> np.ndarray:
+    if source_rate == target_rate:
+        return data
+    ratio = target_rate / source_rate
+    new_length = max(1, int(round(data.shape[0] * ratio)))
+    x_old = np.linspace(0.0, 1.0, num=data.shape[0], endpoint=False)
+    x_new = np.linspace(0.0, 1.0, num=new_length, endpoint=False)
+
+    if data.ndim == 1:
+        return np.interp(x_new, x_old, data).astype(np.float32)
+
+    channels = data.shape[1]
+    resampled = np.empty((new_length, channels), dtype=np.float32)
+    for ch in range(channels):
+        resampled[:, ch] = np.interp(x_new, x_old, data[:, ch])
+    return resampled
 
 
 def phrase_stream(
@@ -1178,6 +1403,8 @@ def play_audio_stream(
     interrupt_event: threading.Event,
     interruptable: bool = True,
     save_path: Path | None = None,
+    output_device_indices: list[str] | None = None,
+    output_sample_rate: int | None = None,
 ) -> None:
     # print(f"Starting audio playback stream at {sample_rate}Hz...", file=sys.stderr)
     try:
@@ -1192,13 +1419,40 @@ def play_audio_stream(
             wav_file.setsampwidth(2) # 16-bit PCM
             wav_file.setframerate(sample_rate)
 
-        with sd.OutputStream(
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32",
-            blocksize=block_size,
-        ) as stream:
-             while True:
+        stream_rate = output_sample_rate or sample_rate
+        streams: list[sd.OutputStream] = []
+        if output_device_indices:
+            for device_idx in output_device_indices:
+                try:
+                    streams.append(
+                        sd.OutputStream(
+                            samplerate=stream_rate,
+                            channels=1,
+                            dtype="float32",
+                            blocksize=block_size,
+                            device=device_idx,
+                        )
+                    )
+                except Exception as exc:
+                    print(
+                        f"Playback warning: could not open output device {device_idx}: {exc}",
+                        file=sys.stderr,
+                    )
+        if not streams:
+            streams.append(
+                sd.OutputStream(
+                    samplerate=stream_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=block_size,
+                )
+            )
+
+        for stream in streams:
+            stream.start()
+
+        try:
+            while True:
                 if interruptable and interrupt_event.is_set():
                     # Gracefully stop playback when interrupted
                     # print("Playback interrupted by event.", file=sys.stderr)
@@ -1217,8 +1471,12 @@ def play_audio_stream(
                 # sd.OutputStream.write expects (frames, channels)
                 if chunk.ndim == 1:
                     chunk = chunk[:, np.newaxis]
-                
-                stream.write(chunk)
+
+                if stream_rate != sample_rate:
+                    chunk = resample_audio(chunk, sample_rate, stream_rate)
+
+                for stream in streams:
+                    stream.write(chunk)
 
                 if wav_file:
                     # Convert float32 back to int16 for wav
@@ -1226,6 +1484,10 @@ def play_audio_stream(
                     clipped = np.clip(chunk, -1.0, 1.0)
                     int16_data = (clipped * 32767).astype(np.int16)
                     wav_file.writeframes(int16_data.tobytes())
+        finally:
+            for stream in streams:
+                stream.stop()
+                stream.close()
         
         if wav_file:
             wav_file.close()
@@ -1234,8 +1496,17 @@ def play_audio_stream(
         print(f"Playback Error: {e}", file=sys.stderr)
 
 
-def play_audio(audio_path: Path, interrupt_event: threading.Event, interruptable: bool = True) -> bool:
+def play_audio(
+    audio_path: Path,
+    interrupt_event: threading.Event,
+    interruptable: bool = True,
+    output_device_indices: list[str] | None = None,
+    output_sample_rate: int | None = None,
+) -> bool:
     data, samplerate = sf.read(audio_path, dtype="float32")
+    if output_sample_rate and output_sample_rate != samplerate:
+        data = resample_audio(data, samplerate, output_sample_rate)
+        samplerate = output_sample_rate
     if data.ndim == 1:
         data = data[:, np.newaxis]
     frames_total = data.shape[0]
@@ -1244,22 +1515,53 @@ def play_audio(audio_path: Path, interrupt_event: threading.Event, interruptable
 
     interrupt_event.clear()
 
-    with sd.OutputStream(
-        samplerate=samplerate,
-        channels=channels,
-        dtype="float32",
-    ) as stream:
+    streams: list[sd.OutputStream] = []
+    if output_device_indices:
+        for device_idx in output_device_indices:
+            try:
+                streams.append(
+                    sd.OutputStream(
+                        samplerate=samplerate,
+                        channels=channels,
+                        dtype="float32",
+                        device=device_idx,
+                    )
+                )
+            except Exception as exc:
+                print(
+                    f"Playback warning: could not open output device {device_idx}: {exc}",
+                    file=sys.stderr,
+                )
+    if not streams:
+        streams.append(
+            sd.OutputStream(
+                samplerate=samplerate,
+                channels=channels,
+                dtype="float32",
+            )
+        )
+
+    for stream in streams:
+        stream.start()
+
+    try:
         cursor = 0
         while cursor < frames_total:
             if interruptable and interrupt_event.is_set():
-                stream.abort()
-                stream.stop()
+                for stream in streams:
+                    stream.abort()
+                    stream.stop()
                 return False
 
             end = min(cursor + block, frames_total)
             chunk = data[cursor:end]
-            stream.write(chunk)
+            for stream in streams:
+                stream.write(chunk)
             cursor = end
+    finally:
+        for stream in streams:
+            stream.stop()
+            stream.close()
 
     return True
 
@@ -1328,9 +1630,13 @@ def run_conversation(config: ConversationConfig) -> None:
     global LAST_HEADSET_MAC, LAST_HEADSET_NAME
     LAST_HEADSET_MAC = os.environ.get("LAST_HEADSET_MAC")
     LAST_HEADSET_NAME = os.environ.get("LAST_HEADSET_NAME")
-    # Update the input device keyword if we have a saved headset name
+    # Log audio devices after Bluetooth connect/reload
+    log_audio_devices()
+    # Update the input/output device keywords if we have a saved headset name
     if LAST_HEADSET_NAME and not config.input_device_keyword:
         config.input_device_keyword = LAST_HEADSET_NAME
+    if LAST_HEADSET_NAME and not config.output_bt_keyword:
+        config.output_bt_keyword = LAST_HEADSET_NAME
 
     if config.input_device_keyword:
         device_index = find_input_device(config.input_device_keyword)
@@ -1382,6 +1688,15 @@ def run_conversation(config: ConversationConfig) -> None:
                         "Falling back to system default.",
                         file=sys.stderr,
                     )
+
+    # Resolve output devices (USB + Bluetooth headset)
+    config.output_device_indices = resolve_output_devices(config)
+    if config.output_device_indices:
+        for device_idx in config.output_device_indices:
+            print(
+                f"Using output device '{device_idx}' (PulseAudio device).",
+                file=sys.stderr,
+            )
 
     stop_event = threading.Event()
     segment_queue: queue.Queue[np.ndarray] = queue.Queue()
@@ -1439,7 +1754,13 @@ def run_conversation(config: ConversationConfig) -> None:
         )
         # Clear interrupt before playing startup sound
         playback_interrupt.clear()
-        play_audio(startup_audio, playback_interrupt, interruptable=False)
+        play_audio(
+            startup_audio,
+            playback_interrupt,
+            interruptable=False,
+            output_device_indices=config.output_device_indices,
+            output_sample_rate=config.output_sample_rate,
+        )
 
         turn = 1
         while True:
@@ -1502,7 +1823,13 @@ def run_conversation(config: ConversationConfig) -> None:
                     "Ok, starting over",
                     reset_audio,
                 )
-                play_audio(reset_audio, playback_interrupt, interruptable=config.interruptable)
+                play_audio(
+                    reset_audio,
+                    playback_interrupt,
+                    interruptable=config.interruptable,
+                    output_device_indices=config.output_device_indices,
+                    output_sample_rate=config.output_sample_rate,
+                )
                 turn += 1
                 continue
 
@@ -1575,7 +1902,15 @@ def run_conversation(config: ConversationConfig) -> None:
 
             playback_thread = threading.Thread(
                 target=play_audio_stream,
-                args=(tts_worker.audio_queue, tts_sample_rate, playback_interrupt, config.interruptable, response_audio_path),
+                args=(
+                    tts_worker.audio_queue,
+                    tts_sample_rate,
+                    playback_interrupt,
+                    config.interruptable,
+                    response_audio_path,
+                    config.output_device_indices,
+                    config.output_sample_rate,
+                ),
                 daemon=True
             )
             current_playback_thread = playback_thread
