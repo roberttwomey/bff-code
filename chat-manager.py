@@ -898,12 +898,9 @@ def auto_detect_pulse_sinks(
         if "bluez_sink" in sink_lower:
             bluez_matches.append(sink)
 
+    # Prioritize USB audio output, only fall back to Bluetooth if USB is not available
     if usb_matches:
-        combined: list[str] = []
-        for item in usb_matches + bt_matches + bluez_matches:
-            if item not in combined:
-                combined.append(item)
-        return combined
+        return usb_matches
     if bt_matches:
         return bt_matches
     if bluez_matches:
