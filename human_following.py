@@ -137,7 +137,8 @@ class HumanFollower:
             stream_port: Port for MJPEG streaming (overrides .env)
         """
         # Read IP from environment variable, fallback to provided ip or default
-        self.ip = ip or os.getenv('UNITREE_GO2_IP', '192.168.4.30')
+        # self.ip = ip or os.getenv('UNITREE_GO2_IP', '192.168.4.30')
+        self.ip = ip or os.getenv('UNITREE_GO2_IP', '192.168.123.161')
         self.frame_queue = Queue()
         self.conn = None
         self.loop = None
