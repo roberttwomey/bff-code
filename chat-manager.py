@@ -1795,7 +1795,7 @@ def run_conversation(config: ConversationConfig) -> None:
         # Announce readiness
         print("Ready to chat...", file=sys.stderr)
         
-        startup_intro = "Bluetooth connected, ready to chat."
+        startup_intro = ""#Bluetooth connected, ready to chat."
         startup_prompt = "Give a short friendly greeting to start the conversation. One sentence."
         startup_line = ""
         for sentence in query_ollama_streaming(
@@ -1893,10 +1893,14 @@ def run_conversation(config: ConversationConfig) -> None:
                     pending_concatenation = ""
 
             # Check for scene triggers
-            matched_scene = next((s for s in scenes if s.trigger and s.trigger.lower() in user_text.lower()), None)
+            matched_scene = next(
+                (s for s in scenes if s.trigger and s.trigger.lower() in user_text.lower()),
+                None,
+            )
             
             # Check for reset command
-            if is_reset_command(user_text) or matched_scene:
+            is_reset = is_reset_command(user_text)
+            if is_reset or matched_scene:
                 if matched_scene:
                     print(f"Scene trigger detected: '{matched_scene.name}'", file=sys.stderr)
                     current_system_prompt = matched_scene.system_prompt
@@ -1913,7 +1917,14 @@ def run_conversation(config: ConversationConfig) -> None:
                         }
                     )
                 else:
+                    # Manual reset command
                     print("Conversation reset. Starting fresh.", file=sys.stderr)
+                    # For manual resets, always return to the Default scene if it exists;
+                    # otherwise fall back to the original configured system prompt.
+                    if default_scene is not None:
+                        current_system_prompt = default_scene.system_prompt
+                    else:
+                        current_system_prompt = config.system_prompt
                     reset_message = "Ok, starting over"
                 
                 messages = build_initial_messages(current_system_prompt)
