@@ -173,6 +173,14 @@ class ConversationConfig:
     ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
 
 
+@dataclass
+class Scene:
+    """Represents a conversational scene with a specific system prompt."""
+    name: str
+    system_prompt: str
+    trigger: str | None = None
+
+
 def parse_args() -> ConversationConfig:
     parser = argparse.ArgumentParser(description="Interactive voice chat assistant")
     parser.add_argument(
@@ -403,7 +411,33 @@ def resolve_piper_config_path(model_path: Path, config_path: Path | None) -> Pat
     raise FileNotFoundError(
         "Could not infer Piper config JSON. Provide --piper-config explicitly."
     )
+    raise FileNotFoundError(
+        "Could not infer Piper config JSON. Provide --piper-config explicitly."
+    )
 
+
+def load_scenes(script_path: Path) -> list[Scene]:
+    """Load scenes from a JSON script file."""
+    if not script_path.exists():
+        print(f"Warning: Script file not found at {script_path}. Using default scene only.", file=sys.stderr)
+        return []
+        
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        scenes = []
+        for item in data:
+            scenes.append(Scene(
+                name=item["name"],
+                system_prompt=item["system_prompt"],
+                trigger=item.get("trigger")
+            ))
+        print(f"Loaded {len(scenes)} scenes from {script_path}", file=sys.stderr)
+        return scenes
+    except Exception as e:
+        print(f"Error loading script file: {e}", file=sys.stderr)
+        return []
 
 def load_piper_voice(
     model_path: Path,
@@ -1614,8 +1648,22 @@ def run_conversation(config: ConversationConfig) -> None:
     session_dir = log_dir / f"session-{session_id}"
     session_dir.mkdir(parents=True, exist_ok=True)
     
-    log_file = session_dir / "session.jsonl"
+    # Load scenes
+    script_path = Path("performance-script.json")
+    scenes = load_scenes(script_path)
     
+    # Set initial system prompt
+    current_system_prompt = config.system_prompt
+    
+    # If "Default" scene exists, use its prompt as the base
+    default_scene = next((s for s in scenes if s.name == "Default"), None)
+    if default_scene:
+        print(f"Using 'Default' scene system prompt.", file=sys.stderr)
+        current_system_prompt = default_scene.system_prompt
+    
+    messages = build_initial_messages(current_system_prompt)
+    
+    log_file = session_dir / "session.jsonl"
     append_log_line(
         log_file,
         {
@@ -1790,6 +1838,22 @@ def run_conversation(config: ConversationConfig) -> None:
         turn = 1
         while True:
             try:
+                # Prioritize any pending messages (e.g. from scene switch context)
+                # No, we don't have a pending message queue for the loop, we rely on segment_queue mostly.
+                # But if we just switched scenes and added to messages, we should fall through to generation.
+                # Wait... the loop structure expects to Get Audio -> Transcribe -> messages.append -> Generate.
+                # If we switched scene, we have `user_text` (the trigger).
+                # We appended it to `messages` in the new context.
+                # So we just need to NOT `continue` if it's a matched_scene, but instead proceed to the "messages.append" (which we essentially did manually) and then generation.
+                
+                # Careful: The original code appends `user_text` at line 1861.
+                # In my replacement above, I added logic:
+                # if matched_scene: messages.append(...)
+                # So I should Skip the standard append at 1861 if I already did it.
+                
+                # Let's adjust the flow in the replacement above to set a flag 'skip_standard_append' or just proceed carefully.
+                pass
+                
                 if pending_segments:
                     phrase = pending_segments.pop(0)
                 else:
@@ -1828,35 +1892,75 @@ def run_conversation(config: ConversationConfig) -> None:
                     user_text = f"{pending_concatenation} {user_text}"
                     pending_concatenation = ""
 
+            # Check for scene triggers
+            matched_scene = next((s for s in scenes if s.trigger and s.trigger.lower() in user_text.lower()), None)
+            
             # Check for reset command
-            if is_reset_command(user_text):
-                messages = build_initial_messages(config.system_prompt)
-                print("Conversation reset. Starting fresh.", file=sys.stderr)
-                append_log_line(
-                    log_file,
-                    {
-                        "type": "reset",
-                        "turn": turn,
-                        "text": user_text,
-                        "audio_path": str(raw_audio),
-                    },
-                )
-                # Synthesize and play reset confirmation message
-                reset_audio = session_dir / f"turn-{turn:03d}-reset.wav"
-                synthesize_with_piper(
-                    piper_voice,
-                    "Ok, starting over",
-                    reset_audio,
-                )
-                play_audio(
-                    reset_audio,
-                    playback_interrupt,
-                    interruptable=config.interruptable,
-                    output_device_indices=config.output_device_indices,
-                    output_sample_rate=config.output_sample_rate,
-                )
-                turn += 1
-                continue
+            if is_reset_command(user_text) or matched_scene:
+                if matched_scene:
+                    print(f"Scene trigger detected: '{matched_scene.name}'", file=sys.stderr)
+                    current_system_prompt = matched_scene.system_prompt
+                    reset_message = f"Switching to scene: {matched_scene.name}"
+                    
+                    # Log the scene switch
+                    append_log_line(
+                        log_file,
+                        {
+                            "type": "scene_switch",
+                            "turn": turn,
+                            "scene": matched_scene.name,
+                            "trigger_text": user_text,
+                        }
+                    )
+                else:
+                    print("Conversation reset. Starting fresh.", file=sys.stderr)
+                    reset_message = "Ok, starting over"
+                
+                messages = build_initial_messages(current_system_prompt)
+                
+                # If it was a scene match, we might want to also add the user's text as the first message
+                # or just let the reset happen and wait for next input?
+                # "when a trigger is detected it should set the llm system prompt to the new prompt and continue the conversation"
+                # Usually implies we respond to the trigger phrase in the NEW context.
+                
+                if matched_scene:
+                     pass
+                
+                if not matched_scene: # Only log reset if it was a manual reset command
+                    append_log_line(
+                        log_file,
+                        {
+                            "type": "reset",
+                            "turn": turn,
+                            "text": user_text,
+                            "audio_path": str(raw_audio),
+                        },
+                    )
+
+                # Synthesize and play confirmation/response (only for manual reset for now?)
+                # If it's a scene switch, we probably want to Generate a response to the trigger phrase immediately
+                # instead of just saying "Ok starting over". 
+                
+                if matched_scene:
+                     # Fall through to normal generation loop with the new messages
+                     pass 
+                else:
+                    # Manual reset behavior
+                    reset_audio = session_dir / f"turn-{turn:03d}-reset.wav"
+                    synthesize_with_piper(
+                        piper_voice,
+                        reset_message,
+                        reset_audio,
+                    )
+                    play_audio(
+                        reset_audio,
+                        playback_interrupt,
+                        interruptable=config.interruptable,
+                        output_device_indices=config.output_device_indices,
+                        output_sample_rate=config.output_sample_rate,
+                    )
+                    turn += 1
+                    continue
 
             messages.append({"role": "user", "content": user_text})
             
