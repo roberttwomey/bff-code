@@ -1616,11 +1616,22 @@ def is_lets_stop_command(text: str) -> bool:
     """Check if the transcribed text is a command to exit the program."""
     text_lower = text.lower().strip()
     stop_phrases = [
-        "snapper, let's stop",
-        "snapper lets stop",
-        "snapper, lets stop",
-        "let's stop",
-        "lets stop",
+        "let's stop the conversation",
+        "lets stop the conversation",
+        "i'd like to end the conversation",
+        "i would like to end the conversation",
+        "id like to end the conversation",
+        "let's stop talking now",
+        "lets stop talking now",
+        "stop the conversation",
+        "end the conversation",
+        "stop talking now",
+        # With wake name prefix
+        "snapper, let's stop the conversation",
+        "snapper lets stop the conversation",
+        "snapper, i'd like to end the conversation",
+        "snapper, let's stop talking now",
+        "snapper lets stop talking now",
     ]
     return any(phrase in text_lower for phrase in stop_phrases)
 
@@ -1949,13 +1960,8 @@ def run_conversation(config: ConversationConfig) -> None:
                 speak("Okay, follow me.")
                 return True
 
-            # Exit the program: "let's stop" / "snapper, let's stop"
-            if (
-                cmd_norm == "let's stop"
-                or cmd_norm == "lets stop"
-                or "let's stop" in cmd_norm
-                or "lets stop" in cmd_norm
-            ):
+            # Exit the program: "let's stop the conversation" / "I'd like to end the conversation" / "let's stop talking now"
+            if is_lets_stop_command(cmd_norm) or is_lets_stop_command(raw_text):
                 append_log_line(
                     log_file,
                     {"type": "special_command", "turn": turn, "command": "lets_stop", "text": raw_text},
