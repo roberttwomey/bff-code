@@ -1318,6 +1318,15 @@ def synthesize_with_piper(
             wav_file.writeframes(data)
 
 
+def _is_punctuation_only(text: str) -> bool:
+    """Return True if text is empty or contains only punctuation/whitespace (no speech content)."""
+    t = text.strip()
+    if not t:
+        return True
+    word_chars_only = re.sub(r"[^\w]", "", t, flags=re.ASCII)  # keep only letters, digits, underscore
+    return len(word_chars_only) == 0
+
+
 class TTSWorker:
     """
     Handles background TTS synthesis and audio buffering.
@@ -2102,8 +2111,8 @@ def run_conversation(config: ConversationConfig) -> None:
                 cleaned_sentence = re.sub(r'\[[^\]]*\]', '', cleaned_sentence)        # Remove [content]
                 cleaned_sentence = re.sub(r'\s+', ' ', cleaned_sentence).strip()     # Normalize whitespace
 
-                if cleaned_sentence:
-                     tts_worker.put_text(cleaned_sentence)
+                if cleaned_sentence and not _is_punctuation_only(cleaned_sentence):
+                    tts_worker.put_text(cleaned_sentence)
                 
             tts_worker.put_text(None) # End of input
             print() # Newline after response
