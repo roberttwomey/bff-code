@@ -1612,6 +1612,19 @@ def play_audio(
     return True
 
 
+def is_lets_stop_command(text: str) -> bool:
+    """Check if the transcribed text is a command to exit the program."""
+    text_lower = text.lower().strip()
+    stop_phrases = [
+        "snapper, let's stop",
+        "snapper lets stop",
+        "snapper, lets stop",
+        "let's stop",
+        "lets stop",
+    ]
+    return any(phrase in text_lower for phrase in stop_phrases)
+
+
 def is_reset_command(text: str) -> bool:
     """Check if the transcribed text is a command to reset the conversation."""
     text_lower = text.lower().strip()
@@ -1936,6 +1949,21 @@ def run_conversation(config: ConversationConfig) -> None:
                 speak("Okay, follow me.")
                 return True
 
+            # Exit the program: "let's stop" / "snapper, let's stop"
+            if (
+                cmd_norm == "let's stop"
+                or cmd_norm == "lets stop"
+                or "let's stop" in cmd_norm
+                or "lets stop" in cmd_norm
+            ):
+                append_log_line(
+                    log_file,
+                    {"type": "special_command", "turn": turn, "command": "lets_stop", "text": raw_text},
+                )
+                speak("Ok, goodbye.")
+                stop_event.set()
+                return True
+
             return False
 
         turn = 1
@@ -1998,6 +2026,24 @@ def run_conversation(config: ConversationConfig) -> None:
                 except Exception as exc:
                     print(f"Reprompt TTS/playback error: {exc}", file=sys.stderr)
                 continue
+
+            # Exit program: "let's stop" / "snapper, let's stop" (keyword detection, no wake word required)
+            if is_lets_stop_command(user_text):
+                try:
+                    goodbye_audio = session_dir / f"turn-{turn:03d}-goodbye.wav"
+                    synthesize_with_piper(piper_voice, "Ok, goodbye.", goodbye_audio)
+                    playback_interrupt.clear()
+                    play_audio(
+                        goodbye_audio,
+                        playback_interrupt,
+                        interruptable=False,
+                        output_device_indices=config.output_device_indices,
+                        output_sample_rate=config.output_sample_rate,
+                    )
+                except Exception as exc:
+                    print(f"Goodbye TTS/playback error: {exc}", file=sys.stderr)
+                stop_event.set()
+                return
 
             if pending_concatenation:
                 if config.flush_on_interrupt:
