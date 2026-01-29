@@ -1615,8 +1615,8 @@ def play_audio(
 def is_lets_stop_command(text: str) -> bool:
     """Check if the transcribed text is a command to exit the program. Requires 'snapper' in input."""
     text_lower = text.lower().strip()
-    if "snapper" not in text_lower:
-        return False
+    # if "snapper" not in text_lower:
+        # return False
     stop_phrases = [
         "let's stop the conversation",
         "lets stop the conversation",
@@ -1635,8 +1635,8 @@ def is_lets_stop_command(text: str) -> bool:
 def is_stop_listening_command(text: str) -> bool:
     """Check if the transcribed text is a command to stop sending input to the LLM. Requires 'snapper' in input."""
     text_lower = text.lower().strip()
-    if "snapper" not in text_lower:
-        return False
+    # if "snapper" not in text_lower:
+        # return False
     stop_phrases = [
         "stop listening",
         "please stop listening",
@@ -1647,8 +1647,8 @@ def is_stop_listening_command(text: str) -> bool:
 def is_start_listening_command(text: str) -> bool:
     """Check if the transcribed text is a command to resume sending input to the LLM. Requires 'snapper' in input."""
     text_lower = text.lower().strip()
-    if "snapper" not in text_lower:
-        return False
+    # if "snapper" not in text_lower:
+        # return False
     start_phrases = [
         "start listening",
         "please start listening",
