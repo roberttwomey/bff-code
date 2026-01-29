@@ -1,8 +1,11 @@
-import cv2, numpy as np, asyncio, logging, threading, time, sys
+import cv2, numpy as np, asyncio, logging, threading, time, sys, os
 from queue import Queue
+from dotenv import load_dotenv
 from aiortc import MediaStreamTrack
-from go2_webrtc_driver.webrtc_driver import Go2WebRTCConnection, WebRTCConnectionMethod
-from go2_webrtc_driver.constants import RTC_TOPIC
+from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod
+from unitree_webrtc_connect.constants import RTC_TOPIC
+
+load_dotenv()
 import open3d as o3d
 import matplotlib.pyplot as plt
 
@@ -244,7 +247,8 @@ def main():
         "motor_state": []
     }
     
-    conn = Go2WebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip="192.168.4.30")
+    ip = os.getenv("UNITREE_GO2_IP", "192.168.4.30")
+    conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=ip)
 
     async def recv_camera_stream(track: MediaStreamTrack):
         while True:
