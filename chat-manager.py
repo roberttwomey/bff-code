@@ -1841,6 +1841,103 @@ def run_conversation(config: ConversationConfig) -> None:
             output_sample_rate=config.output_sample_rate,
         )
 
+        # --- Wake word + special commands ---
+        # Usage:
+        # - Say "ok/okay/hey snapper", then say a command like "shutdown"
+        # - Or say "ok snapper shutdown" (etc) in one utterance
+        WAKE_PHRASES = ("ok snapper", "okay snapper", "hey snapper")
+        WAKE_WINDOW_SECONDS = 8.0
+        wake_armed_until = 0.0
+
+        def normalize_command(text: str) -> str:
+            lowered = text.lower().strip()
+            lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
+            return " ".join(lowered.split())
+
+        def find_wake_phrase(norm_text: str) -> str | None:
+            padded = f" {norm_text} "
+            for phrase in WAKE_PHRASES:
+                if f" {phrase} " in padded:
+                    return phrase
+            return None
+
+        def strip_wake_phrase(norm_text: str, phrase: str) -> str:
+            padded = f" {norm_text} "
+            stripped = padded.replace(f" {phrase} ", " ", 1)
+            return " ".join(stripped.split())
+
+        def run_special_command(cmd: str, raw_text: str) -> bool:
+            """
+            Returns True if handled (and caller should continue/exit),
+            False if not a recognized special command.
+            """
+            nonlocal wake_armed_until
+            cmd_norm = normalize_command(cmd)
+            if not cmd_norm:
+                return False
+            cmd_compact = cmd_norm.replace(" ", "")
+
+            def speak(text: str) -> None:
+                try:
+                    out = session_dir / f"turn-{turn:03d}-special.wav"
+                    synthesize_with_piper(piper_voice, text, out)
+                    playback_interrupt.clear()
+                    play_audio(
+                        out,
+                        playback_interrupt,
+                        interruptable=False,
+                        output_device_indices=config.output_device_indices,
+                        output_sample_rate=config.output_sample_rate,
+                    )
+                except Exception as exc:
+                    print(f"Special command TTS/playback error: {exc}", file=sys.stderr)
+
+            # Clear any pending wake state once we attempt a command
+            wake_armed_until = 0.0
+
+            # Accept broader shutdown phrases:
+            # - "shutdown" / "shut down"
+            # - "shut it down", "shut down now", etc.
+            if (
+                cmd_compact == "shutdown"
+                or "shutdown" in cmd_compact
+                or " shut down " in f" {cmd_norm} "
+                or " shut it down " in f" {cmd_norm} "
+            ):
+                append_log_line(
+                    log_file,
+                    {"type": "special_command", "turn": turn, "command": "shutdown", "text": raw_text},
+                )
+                speak("Shutting down.")
+                shutdown_script = Path(__file__).resolve().parent / "shutdown.py"
+                try:
+                    subprocess.Popen(
+                        [sys.executable, str(shutdown_script), "--yes"],
+                        cwd=str(shutdown_script.parent),
+                    )
+                except Exception as exc:
+                    print(f"Failed to launch shutdown command: {exc}", file=sys.stderr)
+                stop_event.set()
+                return True
+
+            if cmd_norm == "dream":
+                append_log_line(
+                    log_file,
+                    {"type": "special_command", "turn": turn, "command": "dream", "text": raw_text},
+                )
+                speak("Okay.")
+                return True
+
+            if cmd_norm in ("follow me", "follow"):
+                append_log_line(
+                    log_file,
+                    {"type": "special_command", "turn": turn, "command": "follow_me", "text": raw_text},
+                )
+                speak("Okay, follow me.")
+                return True
+
+            return False
+
         turn = 1
         while True:
             try:
@@ -1910,6 +2007,40 @@ def run_conversation(config: ConversationConfig) -> None:
                     print(f"Concatenating previous input: '{pending_concatenation}' + '{user_text}'", file=sys.stderr)
                     user_text = f"{pending_concatenation} {user_text}"
                     pending_concatenation = ""
+
+            # Wake word handling: "ok/okay/hey snapper" arms a short window where the next utterance
+            # is treated as a special command. Also supports "ok snapper shutdown" in one phrase.
+            now = time.time()
+            user_norm = normalize_command(user_text)
+            matched_wake = find_wake_phrase(user_norm)
+            if matched_wake:
+                # Remove the wake phrase and attempt to treat remaining text as an inline command.
+                inline = strip_wake_phrase(user_norm, matched_wake).strip()
+                if inline:
+                    if run_special_command(inline, user_text):
+                        return
+                else:
+                    wake_armed_until = now + WAKE_WINDOW_SECONDS
+                    try:
+                        ack_audio = session_dir / f"turn-{turn:03d}-wake.wav"
+                        synthesize_with_piper(piper_voice, "Yes?", ack_audio)
+                        playback_interrupt.clear()
+                        play_audio(
+                            ack_audio,
+                            playback_interrupt,
+                            interruptable=False,
+                            output_device_indices=config.output_device_indices,
+                            output_sample_rate=config.output_sample_rate,
+                        )
+                    except Exception as exc:
+                        print(f"Wake-word ack TTS/playback error: {exc}", file=sys.stderr)
+                continue
+
+            if wake_armed_until and now <= wake_armed_until:
+                if run_special_command(user_text, user_text):
+                    return
+                # Not recognized: disarm and fall through to normal chat handling.
+                wake_armed_until = 0.0
 
             # Check for scene triggers
             matched_scene = next(
