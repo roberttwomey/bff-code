@@ -1915,7 +1915,7 @@ def run_conversation(config: ConversationConfig) -> None:
             Returns True if handled (and caller should continue/exit),
             False if not a recognized special command.
             """
-            nonlocal wake_armed_until
+            nonlocal wake_armed_until, listening_active, current_system_prompt, messages
             cmd_norm = normalize_command(cmd)
             if not cmd_norm:
                 return False
@@ -1980,15 +1980,20 @@ def run_conversation(config: ConversationConfig) -> None:
                 speak("Okay, follow me.")
                 return True
 
-            # Exit the program: "let's stop the conversation" / "I'd like to end the conversation" / "let's stop talking now"
+            # Stop conversation: stop listening, reset to default system prompt, wait until "snapper start listening"
             if is_lets_stop_command(cmd_norm) or is_lets_stop_command(raw_text):
+                listening_active = False
+                if default_scene is not None:
+                    current_system_prompt = default_scene.system_prompt
+                else:
+                    current_system_prompt = config.system_prompt
+                messages = build_initial_messages(current_system_prompt)
                 append_log_line(
                     log_file,
-                    {"type": "special_command", "turn": turn, "command": "lets_stop", "text": raw_text},
+                    {"type": "stop_conversation", "turn": turn, "command": "lets_stop", "text": raw_text},
                 )
-                speak("Ok, goodbye.")
-                stop_event.set()
-                return True
+                speak("Ok, conversation stopped. Say snapper start listening when you're ready.")
+                return False
 
             return False
 
@@ -2054,23 +2059,39 @@ def run_conversation(config: ConversationConfig) -> None:
                     print(f"Reprompt TTS/playback error: {exc}", file=sys.stderr)
                 continue
 
-            # Exit program: "let's stop" / "snapper, let's stop" (keyword detection, no wake word required)
+            # Stop conversation: stop listening, reset to default system prompt, wait until "snapper start listening"
             if is_lets_stop_command(user_text):
+                listening_active = False
+                # Reset to default system prompt (same as "let's start over")
+                if default_scene is not None:
+                    current_system_prompt = default_scene.system_prompt
+                else:
+                    current_system_prompt = config.system_prompt
+                messages = build_initial_messages(current_system_prompt)
+                print("Conversation stopped (reset to default). Say snapper start listening when ready.", file=sys.stderr)
+                append_log_line(
+                    log_file,
+                    {"type": "stop_conversation", "turn": turn, "text": user_text},
+                )
                 try:
-                    goodbye_audio = session_dir / f"turn-{turn:03d}-goodbye.wav"
-                    synthesize_with_piper(piper_voice, "Ok, goodbye.", goodbye_audio)
+                    stop_conv_audio = session_dir / f"turn-{turn:03d}-stop-conversation.wav"
+                    synthesize_with_piper(
+                        piper_voice,
+                        "Ok, conversation stopped. Say snapper start listening when you're ready.",
+                        stop_conv_audio,
+                    )
                     playback_interrupt.clear()
                     play_audio(
-                        goodbye_audio,
+                        stop_conv_audio,
                         playback_interrupt,
                         interruptable=False,
                         output_device_indices=config.output_device_indices,
                         output_sample_rate=config.output_sample_rate,
                     )
                 except Exception as exc:
-                    print(f"Goodbye TTS/playback error: {exc}", file=sys.stderr)
-                stop_event.set()
-                return
+                    print(f"Stop-conversation TTS/playback error: {exc}", file=sys.stderr)
+                turn += 1
+                continue
 
             # Stop/start listening (no LLM prompting when stopped) — works with or without "snapper"
             if is_stop_listening_command(user_text):
