@@ -1613,8 +1613,10 @@ def play_audio(
 
 
 def is_lets_stop_command(text: str) -> bool:
-    """Check if the transcribed text is a command to exit the program."""
+    """Check if the transcribed text is a command to exit the program. Requires 'snapper' in input."""
     text_lower = text.lower().strip()
+    if "snapper" not in text_lower:
+        return False
     stop_phrases = [
         "let's stop the conversation",
         "lets stop the conversation",
@@ -1626,14 +1628,32 @@ def is_lets_stop_command(text: str) -> bool:
         "stop the conversation",
         "end the conversation",
         "stop talking now",
-        # With wake name prefix
-        "snapper, let's stop the conversation",
-        "snapper lets stop the conversation",
-        "snapper, i'd like to end the conversation",
-        "snapper, let's stop talking now",
-        "snapper lets stop talking now",
     ]
     return any(phrase in text_lower for phrase in stop_phrases)
+
+
+def is_stop_listening_command(text: str) -> bool:
+    """Check if the transcribed text is a command to stop sending input to the LLM. Requires 'snapper' in input."""
+    text_lower = text.lower().strip()
+    if "snapper" not in text_lower:
+        return False
+    stop_phrases = [
+        "stop listening",
+        "please stop listening",
+    ]
+    return any(phrase in text_lower for phrase in stop_phrases)
+
+
+def is_start_listening_command(text: str) -> bool:
+    """Check if the transcribed text is a command to resume sending input to the LLM. Requires 'snapper' in input."""
+    text_lower = text.lower().strip()
+    if "snapper" not in text_lower:
+        return False
+    start_phrases = [
+        "start listening",
+        "please start listening",
+    ]
+    return any(phrase in text_lower for phrase in start_phrases)
 
 
 def is_reset_command(text: str) -> bool:
@@ -1973,6 +1993,7 @@ def run_conversation(config: ConversationConfig) -> None:
             return False
 
         turn = 1
+        listening_active = True  # When False, ignore all transcribed input until "start listening"
         while True:
             try:
                 # Prioritize any pending messages (e.g. from scene switch context)
@@ -2050,6 +2071,55 @@ def run_conversation(config: ConversationConfig) -> None:
                     print(f"Goodbye TTS/playback error: {exc}", file=sys.stderr)
                 stop_event.set()
                 return
+
+            # Stop/start listening (no LLM prompting when stopped) — works with or without "snapper"
+            if is_stop_listening_command(user_text):
+                listening_active = False
+                print("Stopped listening (no LLM prompting until you say 'start listening').", file=sys.stderr)
+                try:
+                    stop_audio = session_dir / f"turn-{turn:03d}-stop-listening.wav"
+                    synthesize_with_piper(
+                        piper_voice,
+                        "Ok, stopped listening.",
+                        stop_audio,
+                    )
+                    playback_interrupt.clear()
+                    play_audio(
+                        stop_audio,
+                        playback_interrupt,
+                        interruptable=config.interruptable,
+                        output_device_indices=config.output_device_indices,
+                        output_sample_rate=config.output_sample_rate,
+                    )
+                except Exception as exc:
+                    print(f"Stop-listening TTS/playback error: {exc}", file=sys.stderr)
+                turn += 1
+                continue
+            if is_start_listening_command(user_text):
+                listening_active = True
+                print("Listening again.", file=sys.stderr)
+                try:
+                    start_audio = session_dir / f"turn-{turn:03d}-start-listening.wav"
+                    synthesize_with_piper(
+                        piper_voice,
+                        "Ok, listening again.",
+                        start_audio,
+                    )
+                    playback_interrupt.clear()
+                    play_audio(
+                        start_audio,
+                        playback_interrupt,
+                        interruptable=config.interruptable,
+                        output_device_indices=config.output_device_indices,
+                        output_sample_rate=config.output_sample_rate,
+                    )
+                except Exception as exc:
+                    print(f"Start-listening TTS/playback error: {exc}", file=sys.stderr)
+                turn += 1
+                continue
+            if not listening_active:
+                # Ignore all other input until "start listening" is heard
+                continue
 
             if pending_concatenation:
                 if config.flush_on_interrupt:
