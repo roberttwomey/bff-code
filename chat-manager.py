@@ -2210,7 +2210,9 @@ def run_conversation(config: ConversationConfig) -> None:
                         }
                     )
                 else:
-                    # Manual reset command
+                    # Manual reset command: reload performance script from disk
+                    scenes = load_scenes(script_path)
+                    default_scene = next((s for s in scenes if s.name == "Default"), None)
                     print("Conversation reset. Starting fresh.", file=sys.stderr)
                     # For manual resets, always return to the Default scene if it exists;
                     # otherwise fall back to the original configured system prompt.
