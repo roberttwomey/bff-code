@@ -16,7 +16,8 @@ DEFAULT_TEXT = "This is a quick Piper test. If you hear me, synthesis worked."
 def default_voice_path() -> Path:
     """Return the bundled voice path if present."""
     root = Path(__file__).resolve().parent
-    candidate = root / "piper" / "en_GB-alan-medium.onnx"
+    # candidate = root / "piper" / "en_GB-alan-medium.onnx"
+    candidate = root / "piper" / "en_GB-arun-medium.onnx"
     return candidate
 
 
