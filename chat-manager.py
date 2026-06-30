@@ -514,7 +514,17 @@ def meter_break(show_levels: bool) -> None:
 
 
 def check_bluetooth_connection_status(mac: str) -> bool:
-    """Check if a Bluetooth device is connected via bluetoothctl."""
+    """Check if a Bluetooth device is connected."""
+    if sys.platform == "darwin":
+        if LAST_HEADSET_NAME:
+            try:
+                for device in sd.query_devices():
+                    if LAST_HEADSET_NAME.lower() in device.get("name", "").lower():
+                        return True
+            except Exception:
+                pass
+        return False
+
     try:
         result = subprocess.run(
             ["bluetoothctl", "info", mac],
@@ -726,6 +736,12 @@ def connect_to_headset(mac: str, name: str) -> bool:
 
 def ensure_headset_connected() -> None:
     """Ensure a Bluetooth headset is connected, auto-connecting or prompting user if needed."""
+    if sys.platform == "darwin":
+        if LAST_HEADSET_NAME:
+            print(f"On macOS, assuming headset '{LAST_HEADSET_NAME}' is managed by the OS.", file=sys.stderr)
+            print("Please ensure it is connected in macOS Bluetooth Settings.", file=sys.stderr)
+        return
+
     # Try auto-connect first
     if LAST_HEADSET_MAC and LAST_HEADSET_NAME:
         if try_auto_connect_headset(LAST_HEADSET_MAC, LAST_HEADSET_NAME):
@@ -813,6 +829,27 @@ def find_input_device(keyword: str, min_channels: int = 1) -> int | None:
         name = device.get("name", "")
         if keyword_lower in name.lower() and device.get("max_input_channels", 0) >= min_channels:
             return idx
+    return None
+
+
+def is_pulseaudio_available() -> bool:
+    if sys.platform == "darwin":
+        return False
+    import shutil
+    return shutil.which("pactl") is not None
+
+
+def find_output_device_by_keyword(keyword: str, min_channels: int = 1) -> str | None:
+    if not keyword:
+        return None
+    keyword_lower = keyword.lower()
+    try:
+        for device in sd.query_devices():
+            name = device.get("name", "")
+            if keyword_lower in name.lower() and device.get("max_output_channels", 0) >= min_channels:
+                return name
+    except Exception:
+        pass
     return None
 
 
@@ -920,19 +957,39 @@ def set_default_pulse_sink(sink_name: str) -> None:
 
 
 def resolve_output_devices(config: ConversationConfig) -> list[str]:
-    output_indices: list[str] = []
-    pulse_sinks = config.pulse_sinks
-    if not pulse_sinks:
-        pulse_sinks = auto_detect_pulse_sinks(
-            config.output_usb_keyword, config.output_bt_keyword
+    # 1. If PulseAudio is available, use the PulseAudio setup.
+    if is_pulseaudio_available():
+        output_indices: list[str] = []
+        pulse_sinks = config.pulse_sinks
+        if not pulse_sinks:
+            pulse_sinks = auto_detect_pulse_sinks(
+                config.output_usb_keyword, config.output_bt_keyword
+            )
+        combined_sink = ensure_pulse_combined_sink(
+            pulse_sinks, config.pulse_combined_sink_name
         )
-    combined_sink = ensure_pulse_combined_sink(
-        pulse_sinks, config.pulse_combined_sink_name
-    )
-    if combined_sink:
-        set_default_pulse_sink(combined_sink)
-    output_indices.append(config.pulse_device_name)
-    return output_indices
+        if combined_sink:
+            set_default_pulse_sink(combined_sink)
+        output_indices.append(config.pulse_device_name)
+        return output_indices
+
+    # 2. On macOS/non-PulseAudio platforms, search for matched hardware output devices.
+    matched_devices = []
+    seen = set()
+    
+    if config.output_bt_keyword:
+        name = find_output_device_by_keyword(config.output_bt_keyword)
+        if name and name not in seen:
+            matched_devices.append(name)
+            seen.add(name)
+            
+    if config.output_usb_keyword:
+        name = find_output_device_by_keyword(config.output_usb_keyword)
+        if name and name not in seen:
+            matched_devices.append(name)
+            seen.add(name)
+            
+    return matched_devices
 
 
 def log_audio_devices() -> None:
@@ -1797,10 +1854,21 @@ def run_conversation(config: ConversationConfig) -> None:
     config.output_device_indices = resolve_output_devices(config)
     if config.output_device_indices:
         for device_idx in config.output_device_indices:
-            print(
-                f"Using output device '{device_idx}' (PulseAudio device).",
-                file=sys.stderr,
-            )
+            if device_idx == "pulse":
+                print(
+                    f"Using output device '{device_idx}' (PulseAudio device).",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Using output device '{device_idx}'.",
+                    file=sys.stderr,
+                )
+    else:
+        print(
+            "Using default system output device.",
+            file=sys.stderr,
+        )
 
     stop_event = threading.Event()
     segment_queue: queue.Queue[np.ndarray] = queue.Queue()
