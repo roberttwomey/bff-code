@@ -119,6 +119,8 @@ DEFAULT_OLLAMA_TOP_P = float(os.environ.get("BFF_OLLAMA_TOP_P", "0.9"))
 DEFAULT_OLLAMA_TOP_K = int(os.environ.get("BFF_OLLAMA_TOP_K", "40"))
 DEFAULT_OLLAMA_NUM_PREDICT = int(os.environ.get("BFF_OLLAMA_NUM_PREDICT", "100"))
 DEFAULT_OLLAMA_NUM_CTX = int(os.environ.get("BFF_OLLAMA_NUM_CTX", "2048"))
+DEFAULT_OLLAMA_THINK_ENV = os.environ.get("BFF_OLLAMA_THINK", "false").lower()
+DEFAULT_OLLAMA_THINK = DEFAULT_OLLAMA_THINK_ENV in ("true", "1", "yes", "on")
 DEFAULT_OUTPUT_USB_KEYWORD = os.environ.get("BFF_OUTPUT_USB_KEYWORD", "USB")
 DEFAULT_OUTPUT_BT_KEYWORD = os.environ.get("BFF_OUTPUT_BT_KEYWORD")
 DEFAULT_OUTPUT_SAMPLE_RATE_ENV = os.environ.get("BFF_OUTPUT_SAMPLE_RATE")
@@ -171,6 +173,7 @@ class ConversationConfig:
     ollama_top_k: int = DEFAULT_OLLAMA_TOP_K
     ollama_num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT
     ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
+    ollama_think: bool = DEFAULT_OLLAMA_THINK
 
 
 @dataclass
@@ -187,6 +190,12 @@ def parse_args() -> ConversationConfig:
         "--ollama-model",
         default=DEFAULT_OLLAMA_MODEL,
         help="Ollama model name to use (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--ollama-think",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_OLLAMA_THINK,
+        help="Enable/disable thinking/reasoning outputs for Ollama models (default: from env or false)",
     )
     parser.add_argument(
         "--whisper-model",
@@ -385,6 +394,7 @@ def parse_args() -> ConversationConfig:
         ollama_top_k=DEFAULT_OLLAMA_TOP_K,
         ollama_num_predict=DEFAULT_OLLAMA_NUM_PREDICT,
         ollama_num_ctx=DEFAULT_OLLAMA_NUM_CTX,
+        ollama_think=args.ollama_think,
     )
 
 
@@ -1226,6 +1236,8 @@ def query_ollama_streaming(
     interruptable: bool = True,
     stop_event: threading.Event | None = None,
     options: dict[str, Any] | None = None,
+    think: bool = False,
+    print_stream: bool = True,
 ) -> Iterable[str]:
     """
     Yields complete sentences from Ollama.
@@ -1242,6 +1254,7 @@ def query_ollama_streaming(
             messages=messages,
             stream=True,
             keep_alive=-1,
+            think=think,
             options=options or {
                 "temperature": 0.7,
                 "top_p": 0.9,
@@ -1255,6 +1268,7 @@ def query_ollama_streaming(
         return
 
     accumulator = SentenceAccumulator()
+    first_chunk = True
 
     for chunk in stream:
         if stop_event and stop_event.is_set():
@@ -1272,6 +1286,13 @@ def query_ollama_streaming(
                 content = getattr(msg, "content", "")
         
         if content:
+            if print_stream:
+                if first_chunk:
+                    sys.stdout.write("Assistant: ")
+                    sys.stdout.flush()
+                    first_chunk = False
+                sys.stdout.write(content)
+                sys.stdout.flush()
             for sentence in accumulator.add(content):
                 yield sentence
     
@@ -1928,6 +1949,8 @@ def run_conversation(config: ConversationConfig) -> None:
                 "num_predict": min(config.ollama_num_predict, 60),
                 "num_ctx": config.ollama_num_ctx,
             },
+            think=config.ollama_think,
+            print_stream=False,
         ):
             startup_line = sentence.strip()
             if startup_line:
@@ -2394,6 +2417,13 @@ def run_conversation(config: ConversationConfig) -> None:
             # Or just check periodically in the generator loop? 
             # The generator loop runs in main thread, so we can check there.
             
+            # Temporarily disable level meter display during query and playback
+            original_show_levels = config.show_levels
+            config.show_levels = False
+            # Clear level meter line
+            sys.stderr.write("\r" + " " * 80 + "\r")
+            sys.stderr.flush()
+
             # Start Playback Thread immediately
             # Use the TTS voice's sample rate for playback
             tts_sample_rate = tts_worker.voice.config.sample_rate if tts_worker.voice else config.sample_rate
@@ -2433,7 +2463,9 @@ def run_conversation(config: ConversationConfig) -> None:
                     "top_k": config.ollama_top_k,
                     "num_predict": config.ollama_num_predict,
                     "num_ctx": config.ollama_num_ctx,
-                }
+                },
+                think=config.ollama_think,
+                print_stream=True,
             ):
                 if check_interrupt():
                     interrupted = True
@@ -2444,8 +2476,8 @@ def run_conversation(config: ConversationConfig) -> None:
                 elapsed = current_time - prev_sentence_time
                 prev_sentence_time = current_time
                 
-                # Print with timing information
-                print(f"\nAssistant: {sentence} ({elapsed:.2f}s)", flush=True)
+                # Print timing info (text is already streamed in real-time)
+                print(f" ({elapsed:.2f}s) ", end="", flush=True)
                 full_assistant_text += sentence + " "
                 
                 # --- CLEANING ---
@@ -2482,6 +2514,7 @@ def run_conversation(config: ConversationConfig) -> None:
                 current_playback_thread = None
                 current_abort_event = None
                 turn += 1
+                config.show_levels = original_show_levels
                 continue
 
             # Wait for playback to finish naturally
@@ -2506,6 +2539,7 @@ def run_conversation(config: ConversationConfig) -> None:
                  current_playback_thread = None
                  current_abort_event = None
                  turn += 1
+                 config.show_levels = original_show_levels
                  continue
             
             messages.append({"role": "assistant", "content": full_assistant_text.strip()})
@@ -2531,6 +2565,7 @@ def run_conversation(config: ConversationConfig) -> None:
             # For now, let's skip re-synthesis to save time/resources on Jetson.
             
             turn += 1
+            config.show_levels = original_show_levels
     except KeyboardInterrupt:
         print("\nExiting conversation.")
     finally:
