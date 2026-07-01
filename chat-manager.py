@@ -123,6 +123,7 @@ DEFAULT_OLLAMA_THINK_ENV = os.environ.get("BFF_OLLAMA_THINK", "false").lower()
 DEFAULT_OLLAMA_THINK = DEFAULT_OLLAMA_THINK_ENV in ("true", "1", "yes", "on")
 DEFAULT_REQUIRE_WAKEWORD_ENV = os.environ.get("BFF_REQUIRE_WAKEWORD", "false").lower()
 DEFAULT_REQUIRE_WAKEWORD = DEFAULT_REQUIRE_WAKEWORD_ENV in ("true", "1", "yes", "on")
+DEFAULT_WAKE_PHRASES_ENV = os.environ.get("BFF_WAKE_PHRASES", "ok snapper, okay snapper, hey snapper, snapper")
 DEFAULT_OUTPUT_USB_KEYWORD = os.environ.get("BFF_OUTPUT_USB_KEYWORD", "USB")
 DEFAULT_OUTPUT_BT_KEYWORD = os.environ.get("BFF_OUTPUT_BT_KEYWORD")
 DEFAULT_OUTPUT_SAMPLE_RATE_ENV = os.environ.get("BFF_OUTPUT_SAMPLE_RATE")
@@ -177,6 +178,7 @@ class ConversationConfig:
     ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
     ollama_think: bool = DEFAULT_OLLAMA_THINK
     require_wakeword: bool = DEFAULT_REQUIRE_WAKEWORD
+    wake_phrases: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -205,6 +207,11 @@ def parse_args() -> ConversationConfig:
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_REQUIRE_WAKEWORD,
         help="Require wake word to trigger LLM prompts (default: from env or false)",
+    )
+    parser.add_argument(
+        "--wake-phrases",
+        default=DEFAULT_WAKE_PHRASES_ENV,
+        help="Comma-separated list of wake phrases (default: from env or 'ok snapper, okay snapper, hey snapper, snapper')",
     )
     parser.add_argument(
         "--whisper-model",
@@ -405,6 +412,7 @@ def parse_args() -> ConversationConfig:
         ollama_num_ctx=DEFAULT_OLLAMA_NUM_CTX,
         ollama_think=args.ollama_think,
         require_wakeword=args.require_wakeword,
+        wake_phrases=[p.strip().lower() for p in args.wake_phrases.split(",") if p.strip()],
     )
 
 
@@ -2021,7 +2029,7 @@ def run_conversation(config: ConversationConfig) -> None:
         # Usage:
         # - Say "ok/okay/hey snapper", then say a command like "shutdown"
         # - Or say "ok snapper shutdown" (etc) in one utterance
-        WAKE_PHRASES = ("ok snapper", "okay snapper", "hey snapper", "snapper")
+        WAKE_PHRASES = config.wake_phrases
         WAKE_WINDOW_SECONDS = 8.0
         wake_armed_until = 0.0
 
