@@ -1185,9 +1185,8 @@ class SentenceAccumulator:
     """Accumulates text chunks and yields complete sentences."""
     def __init__(self):
         self.buffer = ""
-        # Simple sentence endings. Can be improved with nltk/spacy if needed,
-        # but kept simple for speed and dependency minimization.
-        self.endings = {'.', '!', '?', ':'}
+        # Only split on clear sentence endings.
+        self.endings = {'.', '!', '?'}
         
     def add(self, text: str) -> Iterable[str]:
         self.buffer += text
@@ -1197,30 +1196,34 @@ class SentenceAccumulator:
             best_mark = None
             
             for mark in self.endings:
-                idx = self.buffer.find(mark)
-                if idx != -1:
+                start_search = 0
+                while True:
+                    idx = self.buffer.find(mark, start_search)
+                    if idx == -1:
+                        break
+                    # Ignore dots preceded by digits (decimals/list numbers like 1. or 3.14)
+                    if mark == '.' and idx > 0 and self.buffer[idx - 1].isdigit():
+                        start_search = idx + 1
+                        continue
+                    # Ignore dots preceded by common abbreviations
+                    if mark == '.' and idx > 0:
+                        words = self.buffer[:idx].split()
+                        if words:
+                            last_word = words[-1].lower().strip(" \t\n\r*_-")
+                            if last_word in ["mr", "ms", "mrs", "dr", "vs", "eg", "ie"]:
+                                start_search = idx + 1
+                                continue
                     if earliest_end == -1 or idx < earliest_end:
                         earliest_end = idx
                         best_mark = mark
+                    break
             
             if earliest_end == -1:
                 break
                 
-            # We found a sentence end. 
-            # Check if it looks like an abbreviation (e.g. "Mr.", "1.5")
-            # This is a basic heuristic.
             candidate = self.buffer[:earliest_end+1]
             remainder = self.buffer[earliest_end+1:]
             
-            # Very basic abbreviation check: if the "sentence" is too short (<=3 chars) 
-            # and ends in dot, treat it as part of next sentence (e.g. "Mr.")
-            # unless it's just "No." or "Ok."
-            if best_mark == '.' and len(candidate.strip()) <= 3 and candidate.strip().lower() not in ["no.", "ok.", "hi."]:
-                 # It might be an abbreviation, simplified behavior: just wait for more context or next splitter
-                 # But sticking to simple split for now to ensure low latency.
-                 # To do this properly requires lookahead.
-                 pass
-
             yield candidate.strip()
             self.buffer = remainder
 
@@ -1977,7 +1980,7 @@ def run_conversation(config: ConversationConfig) -> None:
                 "num_predict": min(config.ollama_num_predict, 60),
                 "num_ctx": config.ollama_num_ctx,
             },
-            think=config.ollama_think,
+            think=False,
             print_stream=False,
         ):
             startup_line = sentence.strip()
