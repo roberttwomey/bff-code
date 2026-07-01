@@ -1269,6 +1269,7 @@ def query_ollama_streaming(
 
     accumulator = SentenceAccumulator()
     first_chunk = True
+    in_thinking = False
 
     for chunk in stream:
         if stop_event and stop_event.is_set():
@@ -1276,25 +1277,52 @@ def query_ollama_streaming(
             return
 
         content = ""
+        thinking = ""
         # Extract content from various chunk formats
         if isinstance(chunk, dict):
-            content = chunk.get("message", {}).get("content", "")
+            msg = chunk.get("message", {})
+            content = msg.get("content", "")
+            thinking = msg.get("thinking", "")
         else:
              # Object access
             msg = getattr(chunk, "message", None)
             if msg:
                 content = getattr(msg, "content", "")
+                thinking = getattr(msg, "thinking", "")
         
+        text_to_process = ""
+        is_thought = False
         if content:
+            text_to_process = content
+        elif think and thinking:
+            text_to_process = thinking
+            is_thought = True
+
+        if text_to_process:
             if print_stream:
                 if first_chunk:
                     sys.stdout.write("Assistant: ")
                     sys.stdout.flush()
                     first_chunk = False
-                sys.stdout.write(content)
+                
+                # Apply ANSI styling: gray italics for thinking blocks
+                if is_thought and not in_thinking:
+                    sys.stdout.write("\033[3;90m")
+                    sys.stdout.flush()
+                    in_thinking = True
+                elif not is_thought and in_thinking:
+                    sys.stdout.write("\033[0m")
+                    sys.stdout.flush()
+                    in_thinking = False
+                
+                sys.stdout.write(text_to_process)
                 sys.stdout.flush()
-            for sentence in accumulator.add(content):
+            for sentence in accumulator.add(text_to_process):
                 yield sentence
+    
+    if print_stream and in_thinking:
+        sys.stdout.write("\033[0m")
+        sys.stdout.flush()
     
     for sentence in accumulator.flush():
         yield sentence
