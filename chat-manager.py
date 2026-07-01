@@ -121,6 +121,8 @@ DEFAULT_OLLAMA_NUM_PREDICT = int(os.environ.get("BFF_OLLAMA_NUM_PREDICT", "100")
 DEFAULT_OLLAMA_NUM_CTX = int(os.environ.get("BFF_OLLAMA_NUM_CTX", "2048"))
 DEFAULT_OLLAMA_THINK_ENV = os.environ.get("BFF_OLLAMA_THINK", "false").lower()
 DEFAULT_OLLAMA_THINK = DEFAULT_OLLAMA_THINK_ENV in ("true", "1", "yes", "on")
+DEFAULT_REQUIRE_WAKEWORD_ENV = os.environ.get("BFF_REQUIRE_WAKEWORD", "false").lower()
+DEFAULT_REQUIRE_WAKEWORD = DEFAULT_REQUIRE_WAKEWORD_ENV in ("true", "1", "yes", "on")
 DEFAULT_OUTPUT_USB_KEYWORD = os.environ.get("BFF_OUTPUT_USB_KEYWORD", "USB")
 DEFAULT_OUTPUT_BT_KEYWORD = os.environ.get("BFF_OUTPUT_BT_KEYWORD")
 DEFAULT_OUTPUT_SAMPLE_RATE_ENV = os.environ.get("BFF_OUTPUT_SAMPLE_RATE")
@@ -174,6 +176,7 @@ class ConversationConfig:
     ollama_num_predict: int = DEFAULT_OLLAMA_NUM_PREDICT
     ollama_num_ctx: int = DEFAULT_OLLAMA_NUM_CTX
     ollama_think: bool = DEFAULT_OLLAMA_THINK
+    require_wakeword: bool = DEFAULT_REQUIRE_WAKEWORD
 
 
 @dataclass
@@ -196,6 +199,12 @@ def parse_args() -> ConversationConfig:
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_OLLAMA_THINK,
         help="Enable/disable thinking/reasoning outputs for Ollama models (default: from env or false)",
+    )
+    parser.add_argument(
+        "--require-wakeword",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_REQUIRE_WAKEWORD,
+        help="Require wake word to trigger LLM prompts (default: from env or false)",
     )
     parser.add_argument(
         "--whisper-model",
@@ -395,6 +404,7 @@ def parse_args() -> ConversationConfig:
         ollama_num_predict=DEFAULT_OLLAMA_NUM_PREDICT,
         ollama_num_ctx=DEFAULT_OLLAMA_NUM_CTX,
         ollama_think=args.ollama_think,
+        require_wakeword=args.require_wakeword,
     )
 
 
@@ -2011,7 +2021,7 @@ def run_conversation(config: ConversationConfig) -> None:
         # Usage:
         # - Say "ok/okay/hey snapper", then say a command like "shutdown"
         # - Or say "ok snapper shutdown" (etc) in one utterance
-        WAKE_PHRASES = ("ok snapper", "okay snapper", "hey snapper")
+        WAKE_PHRASES = ("ok snapper", "okay snapper", "hey snapper", "snapper")
         WAKE_WINDOW_SECONDS = 8.0
         wake_armed_until = 0.0
 
@@ -2273,17 +2283,22 @@ def run_conversation(config: ConversationConfig) -> None:
                     user_text = f"{pending_concatenation} {user_text}"
                     pending_concatenation = ""
 
-            # Wake word handling: "ok/okay/hey snapper" arms a short window where the next utterance
-            # is treated as a special command. Also supports "ok snapper shutdown" in one phrase.
+            # Wake word handling: "ok/okay/hey snapper" (or "snapper") arms a short window
+            # where the next utterance is processed. Optionally ignores all input if require_wakeword is True.
             now = time.time()
             user_norm = normalize_command(user_text)
             matched_wake = find_wake_phrase(user_norm)
+            
             if matched_wake:
                 # Remove the wake phrase and attempt to treat remaining text as an inline command.
                 inline = strip_wake_phrase(user_norm, matched_wake).strip()
                 if inline:
                     if run_special_command(inline, user_text):
                         return
+                    # Not a special command: treat inline text as the user prompt,
+                    # arm the wake window, and fall through to normal LLM generation.
+                    user_text = inline
+                    wake_armed_until = now + WAKE_WINDOW_SECONDS
                 else:
                     wake_armed_until = now + WAKE_WINDOW_SECONDS
                     try:
@@ -2299,13 +2314,18 @@ def run_conversation(config: ConversationConfig) -> None:
                         )
                     except Exception as exc:
                         print(f"Wake-word ack TTS/playback error: {exc}", file=sys.stderr)
-                continue
-
-            if wake_armed_until and now <= wake_armed_until:
-                if run_special_command(user_text, user_text):
-                    return
-                # Not recognized: disarm and fall through to normal chat handling.
-                wake_armed_until = 0.0
+                    continue
+            else:
+                if wake_armed_until and now <= wake_armed_until:
+                    if run_special_command(user_text, user_text):
+                        return
+                    # Not a special command: disarm wake window and fall through to normal chat handling.
+                    wake_armed_until = 0.0
+                else:
+                    # No wake word detected, and not in the armed wake window.
+                    if config.require_wakeword:
+                        print(f"Ignoring input: Wake word not detected in '{user_text}'", file=sys.stderr)
+                        continue
 
             # Check for scene triggers
             matched_scene = next(
