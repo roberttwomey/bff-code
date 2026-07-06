@@ -179,6 +179,7 @@ class ConversationConfig:
     ollama_think: bool = DEFAULT_OLLAMA_THINK
     require_wakeword: bool = DEFAULT_REQUIRE_WAKEWORD
     wake_phrases: list[str] = field(default_factory=list)
+    no_talking: bool = False
 
 
 @dataclass
@@ -355,6 +356,12 @@ def parse_args() -> ConversationConfig:
         action="store_true",
         help="Disable interruptable behavior for Ollama queries and audio playback (default: from BFF_INTERRUPTABLE env or enabled)",
     )
+    parser.add_argument(
+        "--no-talking",
+        action="store_true",
+        default=False,
+        help="Launch without audio input or speech recognition (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     if args.piper_voice is None:
@@ -411,8 +418,9 @@ def parse_args() -> ConversationConfig:
         ollama_num_predict=DEFAULT_OLLAMA_NUM_PREDICT,
         ollama_num_ctx=DEFAULT_OLLAMA_NUM_CTX,
         ollama_think=args.ollama_think,
-        require_wakeword=args.require_wakeword,
+        require_wakeword=False if args.no_talking else args.require_wakeword,
         wake_phrases=[p.strip().lower() for p in args.wake_phrases.split(",") if p.strip()],
+        no_talking=args.no_talking,
     )
 
 
@@ -1808,7 +1816,10 @@ def build_initial_messages(system_prompt: str) -> list[dict[str, str]]:
 
 
 def run_conversation(config: ConversationConfig) -> None:
-    whisper_model = load_whisper_model(config.whisper_model, config.whisper_compute_type)
+    if not config.no_talking:
+        whisper_model = load_whisper_model(config.whisper_model, config.whisper_compute_type)
+    else:
+        whisper_model = None
     messages = build_initial_messages(config.system_prompt)
     assert config.piper_voice is not None
     piper_voice = load_piper_voice(
@@ -1971,8 +1982,10 @@ def run_conversation(config: ConversationConfig) -> None:
         except Exception as exc:
             print(f"Phrase producer error: {exc}", file=sys.stderr)
 
-    producer_thread = threading.Thread(target=producer, daemon=True)
-    producer_thread.start()
+    producer_thread = None
+    if not config.no_talking:
+        producer_thread = threading.Thread(target=producer, daemon=True)
+        producer_thread.start()
 
     # Use the session directory for audio files instead of a temp dir
     try:
@@ -2140,64 +2153,72 @@ def run_conversation(config: ConversationConfig) -> None:
         turn = 1
         listening_active = True  # When False, ignore all transcribed input until "start listening"
         while True:
-            try:
-                # Prioritize any pending messages (e.g. from scene switch context)
-                # No, we don't have a pending message queue for the loop, we rely on segment_queue mostly.
-                # But if we just switched scenes and added to messages, we should fall through to generation.
-                # Wait... the loop structure expects to Get Audio -> Transcribe -> messages.append -> Generate.
-                # If we switched scene, we have `user_text` (the trigger).
-                # We appended it to `messages` in the new context.
-                # So we just need to NOT `continue` if it's a matched_scene, but instead proceed to the "messages.append" (which we essentially did manually) and then generation.
-                
-                # Careful: The original code appends `user_text` at line 1861.
-                # In my replacement above, I added logic:
-                # if matched_scene: messages.append(...)
-                # So I should Skip the standard append at 1861 if I already did it.
-                
-                # Let's adjust the flow in the replacement above to set a flag 'skip_standard_append' or just proceed carefully.
-                pass
-                
-                if pending_segments:
-                    phrase = pending_segments.pop(0)
-                else:
-                    phrase = segment_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            raw_audio = session_dir / f"turn-{turn:03d}-input.wav"
-            sf.write(raw_audio, phrase, config.sample_rate)
-
-            # If this segment interrupted a previous turn, ensure previous TTS is fully stopped
-            if current_tts_worker is not None:
-                current_tts_worker.stop()
-                current_tts_worker = None
-            if current_playback_thread is not None and current_playback_thread.is_alive():
-                playback_interrupt.set()
-                current_playback_thread.join(timeout=0.5)
-                current_playback_thread = None
-            if current_abort_event is not None:
-                current_abort_event.set()
-                current_abort_event = None
-
-            user_text = transcribe_audio(whisper_model, raw_audio, config.show_levels)
-            if not user_text:
-                # Prompt the user via TTS instead of printing.
+            if config.no_talking:
                 try:
-                    reprompt_text = "what did you say?"
-                    reprompt_audio = session_dir / f"turn-{turn:03d}-reprompt.wav"
-                    synthesize_with_piper(piper_voice, reprompt_text, reprompt_audio)
-                    # Clear interrupt flag since this didn't result in a query
-                    playback_interrupt.clear()
-                    play_audio(
-                        reprompt_audio,
-                        playback_interrupt,
-                        interruptable=config.interruptable,
-                        output_device_indices=config.output_device_indices,
-                        output_sample_rate=config.output_sample_rate,
-                    )
-                except Exception as exc:
-                    print(f"Reprompt TTS/playback error: {exc}", file=sys.stderr)
-                continue
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    user_text = input("User: ").strip()
+                    if not user_text:
+                        continue
+                except (KeyboardInterrupt, EOFError):
+                    print("\nExiting conversation.")
+                    break
+
+                # If this input interrupted a previous turn, ensure previous TTS is fully stopped
+                if current_tts_worker is not None:
+                    current_tts_worker.stop()
+                    current_tts_worker = None
+                if current_playback_thread is not None and current_playback_thread.is_alive():
+                    playback_interrupt.set()
+                    current_playback_thread.join(timeout=0.5)
+                    current_playback_thread = None
+                if current_abort_event is not None:
+                    current_abort_event.set()
+                    current_abort_event = None
+                raw_audio = None
+            else:
+                try:
+                    if pending_segments:
+                        phrase = pending_segments.pop(0)
+                    else:
+                        phrase = segment_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                raw_audio = session_dir / f"turn-{turn:03d}-input.wav"
+                sf.write(raw_audio, phrase, config.sample_rate)
+
+                # If this segment interrupted a previous turn, ensure previous TTS is fully stopped
+                if current_tts_worker is not None:
+                    current_tts_worker.stop()
+                    current_tts_worker = None
+                if current_playback_thread is not None and current_playback_thread.is_alive():
+                    playback_interrupt.set()
+                    current_playback_thread.join(timeout=0.5)
+                    current_playback_thread = None
+                if current_abort_event is not None:
+                    current_abort_event.set()
+                    current_abort_event = None
+
+                user_text = transcribe_audio(whisper_model, raw_audio, config.show_levels)
+                if not user_text:
+                    # Prompt the user via TTS instead of printing.
+                    try:
+                        reprompt_text = "what did you say?"
+                        reprompt_audio = session_dir / f"turn-{turn:03d}-reprompt.wav"
+                        synthesize_with_piper(piper_voice, reprompt_text, reprompt_audio)
+                        # Clear interrupt flag since this didn't result in a query
+                        playback_interrupt.clear()
+                        play_audio(
+                            reprompt_audio,
+                            playback_interrupt,
+                            interruptable=config.interruptable,
+                            output_device_indices=config.output_device_indices,
+                            output_sample_rate=config.output_sample_rate,
+                        )
+                    except Exception as exc:
+                        print(f"Reprompt TTS/playback error: {exc}", file=sys.stderr)
+                    continue
 
             # Stop conversation: stop listening, reset to default system prompt, wait until "snapper start listening"
             if is_lets_stop_command(user_text):
@@ -2389,7 +2410,7 @@ def run_conversation(config: ConversationConfig) -> None:
                             "type": "reset",
                             "turn": turn,
                             "text": user_text,
-                            "audio_path": str(raw_audio),
+                            "audio_path": str(raw_audio) if raw_audio else None,
                         },
                     )
 
@@ -2435,7 +2456,7 @@ def run_conversation(config: ConversationConfig) -> None:
                     "type": "user",
                     "turn": turn,
                     "text": user_text,
-                    "audio_path": str(raw_audio),
+                    "audio_path": str(raw_audio) if raw_audio else None,
                 },
             )
 
@@ -2453,6 +2474,8 @@ def run_conversation(config: ConversationConfig) -> None:
             
             # 2. Check interruption function
             def check_interrupt():
+                if config.no_talking:
+                    return False
                 if not config.interruptable:
                     return False
                 try:
@@ -2629,7 +2652,8 @@ def run_conversation(config: ConversationConfig) -> None:
         print("\nExiting conversation.")
     finally:
         stop_event.set()
-        producer_thread.join(timeout=1.0)
+        if producer_thread is not None:
+            producer_thread.join(timeout=1.0)
         append_log_line(
             log_file,
             {"type": "session_end"},
